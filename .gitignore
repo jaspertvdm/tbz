@@ -1,1 +1,9 @@
 target/
+
+# Python
+python/dist/
+python/*.egg-info/
+python/tbz/__pycache__/
+__pycache__/
+*.pyc
+.tbz/signing.key
