@@ -4,10 +4,13 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "TIBET Airlock: sandboxed decompression with eBPF kernel enforcement"
+keywords = ["security", "sandbox", "decompression", "ebpf", "zero-trust"]
+categories = ["os", "cryptography"]
 
 [dependencies]
-tbz-core = { path = "../tbz-core" }
+tbz-core = { path = "../tbz-core", version = "0.1.0" }
 zeroize.workspace = true
 tokio.workspace = true
 thiserror.workspace = true

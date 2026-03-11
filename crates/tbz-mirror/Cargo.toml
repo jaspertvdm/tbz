@@ -4,10 +4,13 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "TIBET Transparency Mirror: sled-backed distributed trust database"
+keywords = ["security", "transparency", "supply-chain", "provenance", "zero-trust"]
+categories = ["database", "cryptography"]
 
 [dependencies]
-tbz-core = { path = "../tbz-core" }
+tbz-core = { path = "../tbz-core", version = "0.1.0" }
 sled.workspace = true
 serde.workspace = true
 serde_json.workspace = true
