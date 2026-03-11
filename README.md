@@ -1,59 +1,114 @@
-# 📦 TIBET-zip (TBZ)
-**Deterministic, block-level authenticated compression for the Zero-Trust era.**
+# TBZ — TIBET-zip
+
+**Block-level authenticated compression for the Zero-Trust era.**
 
 [![Rust](https://img.shields.io/badge/rust-pure-orange.svg)](https://www.rust-lang.org/)
-[![Status](https://img.shields.io/badge/status-architecture_draft-blue.svg)]()
+[![Status](https://img.shields.io/badge/status-working_prototype-green.svg)]()
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)]()
 
-De huidige digitale infrastructuur leunt op blind vertrouwen. Klassieke archiefformaten (`.zip`, `.tar.gz`) zijn semantisch leeg: ze bevatten geen cryptografisch bewijs van herkomst, intentie of autorisatie. Dit leidt tot catastrofale kwetsbaarheden zoals "Zombie ZIP" exploits en AI-model supply chain attacks.
+Classic archive formats (`.zip`, `.tar.gz`) are semantically empty — no cryptographic proof of origin, intent, or authorization. This leads to supply chain attacks like "Zombie ZIP" exploits and AI model poisoning.
 
-**TBZ (TIBET-zip)** herontwerpt datacompressie vanuit de *First Principles* van Zero-Trust. Het is geen nieuw compressie-algoritme, maar een semantische, cryptografische beveiligingsschil rondom `zstd`.
+**TBZ** redesigns compression from Zero-Trust first principles. Every block carries its own [TIBET](https://github.com/jaspertvdm/tbz/blob/main/ARCHITECTURE.md) provenance envelope and Ed25519 signature. Invalid blocks are rejected before decompression touches memory.
 
-## ✨ Killer Features
+## Features
 
-* 🚀 **Streaming Validation (Fail-Fast):** Blokken worden on-the-fly gedecomprimeerd en cryptografisch gevalideerd. Een gemanipuleerd blok stopt het proces direct; de malware raakt het uitvoerbare geheugen nooit.
-* 🛡️ **eBPF TIBET Airlock:** Een meedogenloze kernel-level quarantaine-omgeving. Bestanden worden in een geïsoleerde buffer geëvalueerd en bij falen overschreven met een binaire `0x00 wipe`.
-* 🪪 **JIS Sector Autorisatie:** Eén archiefbestand, meerdere views. Bepaal via cryptografische claims (JIS) wie welk deel van het archief mag uitpakken (bijv. publieke code vs. geheime keys).
-* 🪞 **Transparency Mirror:** Een gedistribueerde (DHT) database die cryptografische vingerafdrukken van bekende packages verifieert, gebouwd op `sled`.
-* 🦀 **100% Pure Rust:** Geheugenveilig, razendsnel, en platform-onafhankelijk. Geen kwetsbare C/C++ dependencies.
+- **Streaming Fail-Fast** — blocks validate on-the-fly. Tampered block? Stop immediately. Malware never reaches executable memory.
+- **Ed25519 per block** — every block is cryptographically signed. Signatures are verified against the public key embedded in the manifest.
+- **TIBET Envelope** — per-block provenance: ERIN (content hash), ERAAN (dependencies), EROMHEEN (context), ERACHTER (intent).
+- **JIS Sector Authorization** — one archive, multiple views. Control who can decompress which blocks via bilateral identity claims.
+- **TIBET Airlock** — quarantine buffer with 0x00 wipe on failure. eBPF kernel-level enforcement when available, userspace fallback otherwise.
+- **Transparency Mirror** — distributed trust database (sled-backed) for verifying package provenance across the supply chain.
+- **100% Pure Rust** — no C/C++ dependencies. Memory-safe, fast, portable.
 
-## 🏗️ Architectuur
+## Quick Start
 
-TBZ vervangt 'alles-of-niets' decompressie door een gelaagde *streaming pipeline*. Elk blok in een `.tbz` archief bevat zijn eigen TIBET-token (provenance) en JIS-autorisatie.
+```bash
+# Build
+cargo build --release
 
-```text
- Netwerk             TIBET Airlock (eBPF)       Bestandssysteem
-    │                      │                       │
-    ├── BLOK 0 ──────► manifest lezen              │
-    │                      │ check JIS levels      │
-    │                      │                       │
-    ├── BLOK 1 ──────► decompress + validate       │
-    │                      │ JIS authorize?        │
-    │                      │ ✓ ─────────────────► pad toewijzen
-    │                      │ ✗ ── 0x00 wipe        │
-    │                      │                       │
-    ├── BLOK 2 ──────► decompress (parallel!)      │
-  (downloading)            │ ...                   │
+# Initialize a repo with Ed25519 keypair + .jis.json
+tbz init --platform github --account you --repo yourproject
 
-Meer weten? Lees het volledige Architecture Design Document (ADD) in deze repository.
+# Pack a directory into a TBZ archive
+tbz pack ./src -o release.tbz
 
-💻 Developer Workflow (Concept)
+# Inspect the archive structure
+tbz inspect release.tbz
 
-Veranker je repository identiteit eenmalig in GitHub (.jis.json), en pack je archieven met onweerlegbare provenance:
-📂 Workspace Structuur
+# Verify integrity (SHA-256 hashes + Ed25519 signatures)
+tbz verify release.tbz
 
-Het project is opgedeeld in modulaire, testbare Rust crates:
+# Extract through the TIBET Airlock
+tbz unpack release.tbz -o ./extracted
+```
 
-    tbz-core: De kernlogica. Zstd frames, TIBET-envelopes, en block headers.
+## Example Output
 
-    tbz-cli: De command-line interface (tbz pack, tbz unpack).
+```
+$ tbz verify release.tbz
 
-    tbz-airlock: De userspace manager en eBPF kernel hooks (via Aya).
+TBZ verify: release.tbz
 
-    tbz-mirror: De lokale sled cache en DHT-client voor supply-chain verificatie.
+  Signing key: Ed25519 77214ce9c262843e
 
-    tbz-jis: Parser voor .jis.json en de identiteit-protocollen.
+  [0] OK — hash + signature verified
+  [1] OK — hash + signature verified
+  [2] OK — hash + signature verified
 
-🤝 Bijdragen
+  Result: ALL 3 BLOCKS VERIFIED (hash + Ed25519) ✓
+```
 
-Dit protocol is momenteel in de ontwerpfase (Draft). Issues en Pull Requests gericht op de architectuur, edge-cases en implementatiedetails in Rust zijn meer dan welkom!
+Tampered archive detection:
+```
+$ tbz verify tampered.tbz
+
+  [0] OK — hash + signature verified
+  [1] OK — hash + signature verified
+  [2] FAIL signature: Signature verification failed
+  [2] FAIL — decompress error: ...
+
+  Result: 2 ERRORS in 3 blocks ✗
+```
+
+## Block Format
+
+```
+┌─────────────────────────────────────────────────┐
+│ Magic: 0x54425A ("TBZ")                         │
+│ Header (JSON): version, block_index, type, JIS  │
+│ TIBET Envelope (JSON): ERIN, ERAAN, EROMHEEN,    │
+│   ERACHTER — full provenance per block          │
+│ Payload: zstd-compressed data                   │
+│ Signature: Ed25519 (64 bytes) over all above    │
+└─────────────────────────────────────────────────┘
+```
+
+Block 0 is always the **Manifest** — the signed index of the archive containing the Ed25519 public key, block metadata, and total sizes (zip-bomb protection).
+
+## Workspace Structure
+
+```
+crates/
+  tbz-core/      Block format, TIBET envelope, zstd, Ed25519, streaming reader/writer
+  tbz-cli/       Command-line tool: pack, unpack, verify, inspect, init
+  tbz-airlock/   Quarantine buffer, eBPF detection, 0x00 wipe
+  tbz-mirror/    sled-backed trust database, attestations
+  tbz-jis/       .jis.json parser, sector mapping, JIS authorization
+```
+
+## Architecture
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design document including:
+- Threat model and attack surface analysis
+- IETF draft considerations
+- eBPF Airlock kernel hook design
+- JIS bilateral identity protocol
+- Transparency Mirror DHT design
+
+## Author
+
+**Jasper van de Meent** — [HumoticaOS](https://humotica.nl)
+
+## License
+
+MIT / Apache-2.0

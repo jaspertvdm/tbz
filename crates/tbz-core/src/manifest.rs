@@ -14,6 +14,9 @@ pub struct Manifest {
     pub tbz_version: u8,
     /// Total number of blocks (including manifest)
     pub block_count: u32,
+    /// Ed25519 verifying (public) key in hex — used to verify all block signatures
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signing_key: Option<String>,
     /// Per-block metadata
     pub blocks: Vec<BlockEntry>,
     /// Archive structure: flat or deep (nested)
@@ -61,12 +64,34 @@ impl Manifest {
         Self {
             tbz_version: crate::VERSION,
             block_count: 1, // manifest itself
+            signing_key: None,
             blocks: Vec::new(),
             structure: ArchiveStructure::Flat,
             total_uncompressed_size: 0,
             max_nesting_depth: 0,
             capabilities: Vec::new(),
         }
+    }
+
+    /// Set the Ed25519 verifying key for this manifest
+    pub fn set_signing_key(&mut self, verifying_key: &ed25519_dalek::VerifyingKey) {
+        let hex: String = verifying_key.to_bytes().iter().map(|b| format!("{:02x}", b)).collect();
+        self.signing_key = Some(hex);
+    }
+
+    /// Parse the verifying key from the manifest
+    pub fn get_verifying_key(&self) -> Option<ed25519_dalek::VerifyingKey> {
+        let hex = self.signing_key.as_ref()?;
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .filter_map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
+            .collect();
+        if bytes.len() != 32 {
+            return None;
+        }
+        let mut key_bytes = [0u8; 32];
+        key_bytes.copy_from_slice(&bytes);
+        ed25519_dalek::VerifyingKey::from_bytes(&key_bytes).ok()
     }
 
     /// Add a block entry to the manifest

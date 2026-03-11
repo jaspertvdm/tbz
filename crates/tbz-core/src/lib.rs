@@ -29,3 +29,6 @@ pub enum BlockType {
 
 /// JIS authorization level for a block
 pub type JisLevel = u8;
+
+// Re-export ed25519 types for consumers
+pub use ed25519_dalek::{SigningKey, VerifyingKey};

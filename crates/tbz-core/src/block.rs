@@ -80,14 +80,31 @@ pub struct Block {
     pub payload: Vec<u8>,
     /// Ed25519 signature over header + envelope + payload
     pub signature: Vec<u8>,
+    /// Raw JSON bytes of header (needed for signature verification)
+    pub header_raw: Vec<u8>,
+    /// Raw JSON bytes of envelope (needed for signature verification)
+    pub envelope_raw: Vec<u8>,
 }
 
 impl Block {
-    /// Validate this block's integrity (header + signature)
+    /// Validate this block's integrity (header only, no signature check)
     pub fn validate(&self) -> Result<(), BlockError> {
         self.header.validate()?;
-        // Signature verification delegated to signature module
         Ok(())
+    }
+
+    /// Verify the Ed25519 signature of this block against a verifying key.
+    /// Reconstructs the signing payload from raw header + envelope + compressed payload.
+    pub fn verify_signature(
+        &self,
+        verifying_key: &ed25519_dalek::VerifyingKey,
+    ) -> Result<(), BlockError> {
+        let mut sign_data = Vec::new();
+        sign_data.extend_from_slice(&self.header_raw);
+        sign_data.extend_from_slice(&self.envelope_raw);
+        sign_data.extend_from_slice(&self.payload);
+        crate::signature::verify(&sign_data, &self.signature, verifying_key)
+            .map_err(|_| BlockError::SignatureInvalid)
     }
 
     /// Decompress the payload via zstd

@@ -212,6 +212,8 @@ impl<R: Read> TbzReader<R> {
             envelope,
             payload,
             signature: sig,
+            header_raw: header_buf,
+            envelope_raw: envelope_buf,
         }))
     }
 
@@ -274,5 +276,96 @@ mod tests {
             String::from_utf8(decompressed).unwrap(),
             "Hello from TBZ! This is block-level authenticated compression."
         );
+    }
+
+    #[test]
+    fn test_signature_verification_roundtrip() {
+        let (signing_key, _) = signature::generate_keypair();
+        let verifying_key = signing_key.verifying_key();
+
+        // Build manifest with embedded public key
+        let mut manifest = Manifest::new();
+        manifest.set_signing_key(&verifying_key);
+
+        let mut buf = Vec::new();
+        {
+            let mut writer = TbzWriter::new(&mut buf, signing_key);
+            writer.write_manifest(&manifest).unwrap();
+
+            let data = b"Signed content";
+            let envelope = TibetEnvelope::new(
+                signature::sha256_hash(data),
+                "data",
+                "text/plain",
+                "test",
+                "Signed data block",
+                vec!["block:0".to_string()],
+            );
+            writer.write_data_block(data, 0, &envelope).unwrap();
+        }
+
+        // Read and verify all blocks
+        let mut reader = TbzReader::new(buf.as_slice());
+        let blocks = reader.read_all_blocks().unwrap();
+
+        // Extract verifying key from manifest
+        let manifest_data = blocks[0].decompress().unwrap();
+        let parsed_manifest: Manifest = serde_json::from_slice(&manifest_data).unwrap();
+        let vk = parsed_manifest.get_verifying_key().expect("signing key in manifest");
+
+        // Every block must pass signature verification
+        for block in &blocks {
+            block.verify_signature(&vk).expect("signature must be valid");
+        }
+
+        // Verify content hash for data block
+        let decompressed = blocks[1].decompress().unwrap();
+        let hash = signature::sha256_hash(&decompressed);
+        assert_eq!(hash, blocks[1].envelope.erin.content_hash);
+    }
+
+    #[test]
+    fn test_tampered_block_fails_signature() {
+        let (signing_key, _) = signature::generate_keypair();
+        let verifying_key = signing_key.verifying_key();
+
+        let mut buf = Vec::new();
+        {
+            let mut manifest = Manifest::new();
+            manifest.set_signing_key(&verifying_key);
+            let mut writer = TbzWriter::new(&mut buf, signing_key);
+            writer.write_manifest(&manifest).unwrap();
+
+            let data = b"Original content";
+            let envelope = TibetEnvelope::new(
+                signature::sha256_hash(data),
+                "data",
+                "text/plain",
+                "test",
+                "Test block",
+                vec!["block:0".to_string()],
+            );
+            writer.write_data_block(data, 0, &envelope).unwrap();
+        }
+
+        // Read blocks
+        let mut reader = TbzReader::new(buf.as_slice());
+        let mut blocks = reader.read_all_blocks().unwrap();
+
+        // Tamper with the data block payload
+        if let Some(last_byte) = blocks[1].payload.last_mut() {
+            *last_byte ^= 0xFF;
+        }
+
+        // Extract key and verify — should fail for tampered block
+        let manifest_data = blocks[0].decompress().unwrap();
+        let parsed: Manifest = serde_json::from_slice(&manifest_data).unwrap();
+        let vk = parsed.get_verifying_key().unwrap();
+
+        // Manifest block should still verify
+        assert!(blocks[0].verify_signature(&vk).is_ok());
+
+        // Tampered data block must fail
+        assert!(blocks[1].verify_signature(&vk).is_err());
     }
 }

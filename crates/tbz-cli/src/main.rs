@@ -128,6 +128,9 @@ fn cmd_pack(path: &str, output: &str, default_jis_level: u8) -> anyhow::Result<(
         });
     }
 
+    // Embed verifying key in manifest
+    manifest.set_signing_key(&verifying_key);
+
     // Write TBZ archive
     let out_file = fs::File::create(output)?;
     let mut writer = TbzWriter::new(BufWriter::new(out_file), signing_key);
@@ -172,8 +175,7 @@ fn cmd_pack(path: &str, output: &str, default_jis_level: u8) -> anyhow::Result<(
     writer.finish();
 
     // Show public key (for verification)
-    let vk_bytes = verifying_key.to_bytes();
-    let vk_hex: String = vk_bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    let vk_hex = hex_encode(&verifying_key.to_bytes());
 
     println!("\nArchive written: {}", output);
     println!("  Blocks: {}", total_blocks);
@@ -320,41 +322,86 @@ fn cmd_verify(archive: &str) -> anyhow::Result<()> {
 
     let mut errors = 0;
     let mut block_idx = 0;
+    let mut verifying_key: Option<tbz_core::VerifyingKey> = None;
 
     while let Some(block) = reader.read_block()? {
         // Validate header
         if let Err(e) = block.validate() {
-            println!("  [{}] FAIL: {}", block.header.block_index, e);
+            println!("  [{}] FAIL header: {}", block.header.block_index, e);
             errors += 1;
-        } else {
-            // Verify content hash matches TIBET ERIN
-            match block.decompress() {
-                Ok(decompressed) => {
-                    let actual_hash = signature::sha256_hash(&decompressed);
-                    if actual_hash == block.envelope.erin.content_hash {
-                        println!("  [{}] OK — hash verified", block.header.block_index);
+            block_idx += 1;
+            continue;
+        }
+
+        // Extract verifying key from manifest (block 0)
+        if block.header.block_type == BlockType::Manifest {
+            if let Ok(decompressed) = block.decompress() {
+                if let Ok(manifest) = serde_json::from_slice::<Manifest>(&decompressed) {
+                    verifying_key = manifest.get_verifying_key();
+                    if let Some(ref vk) = verifying_key {
+                        let vk_hex = hex_encode(&vk.to_bytes());
+                        println!("  Signing key: Ed25519 {}", &vk_hex[..16]);
+                        println!();
                     } else {
-                        println!(
-                            "  [{}] FAIL — hash mismatch\n    expected: {}\n    actual:   {}",
-                            block.header.block_index,
-                            block.envelope.erin.content_hash,
-                            actual_hash,
-                        );
-                        errors += 1;
+                        println!("  WARNING: No signing key in manifest — signature checks skipped\n");
                     }
-                }
-                Err(e) => {
-                    println!("  [{}] FAIL — decompress error: {}", block.header.block_index, e);
-                    errors += 1;
                 }
             }
         }
+
+        // 1. Verify Ed25519 signature (cryptographic proof of block integrity)
+        let sig_ok = if let Some(ref vk) = verifying_key {
+            match block.verify_signature(vk) {
+                Ok(()) => true,
+                Err(e) => {
+                    println!("  [{}] FAIL signature: {}", block.header.block_index, e);
+                    errors += 1;
+                    false
+                }
+            }
+        } else {
+            true // no key available, skip
+        };
+
+        // 2. Verify content hash matches TIBET ERIN
+        match block.decompress() {
+            Ok(decompressed) => {
+                let actual_hash = signature::sha256_hash(&decompressed);
+                if actual_hash == block.envelope.erin.content_hash {
+                    let sig_status = if verifying_key.is_some() && sig_ok {
+                        "hash + signature"
+                    } else if verifying_key.is_some() {
+                        "hash only (sig FAILED)"
+                    } else {
+                        "hash only (no key)"
+                    };
+                    println!("  [{}] OK — {} verified", block.header.block_index, sig_status);
+                } else {
+                    println!(
+                        "  [{}] FAIL — hash mismatch\n    expected: {}\n    actual:   {}",
+                        block.header.block_index,
+                        block.envelope.erin.content_hash,
+                        actual_hash,
+                    );
+                    errors += 1;
+                }
+            }
+            Err(e) => {
+                println!("  [{}] FAIL — decompress error: {}", block.header.block_index, e);
+                errors += 1;
+            }
+        }
+
         block_idx += 1;
     }
 
     println!();
     if errors == 0 {
-        println!("  Result: ALL {} BLOCKS VERIFIED ✓", block_idx);
+        if verifying_key.is_some() {
+            println!("  Result: ALL {} BLOCKS VERIFIED (hash + Ed25519) ✓", block_idx);
+        } else {
+            println!("  Result: ALL {} BLOCKS VERIFIED (hash only, no signing key) ✓", block_idx);
+        }
     } else {
         println!("  Result: {} ERRORS in {} blocks ✗", errors, block_idx);
     }
@@ -362,7 +409,7 @@ fn cmd_verify(archive: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Generate .jis.json for current repo
+/// Generate .jis.json and Ed25519 keypair for current repo
 fn cmd_init(platform: &str, account: Option<String>, repo: Option<String>) -> anyhow::Result<()> {
     let account = account.unwrap_or_else(|| "<your-account>".to_string());
     let repo = repo.unwrap_or_else(|| {
@@ -372,12 +419,52 @@ fn cmd_init(platform: &str, account: Option<String>, repo: Option<String>) -> an
             .unwrap_or_else(|| "<repo>".to_string())
     });
 
-    let (_, verifying_key) = signature::generate_keypair();
-    let vk_hex: String = verifying_key.to_bytes().iter().map(|b| format!("{:02x}", b)).collect();
+    // Check if .tbz/ already exists
+    let tbz_dir = Path::new(".tbz");
+    let key_path = tbz_dir.join("signing.key");
+    let pub_path = tbz_dir.join("signing.pub");
+
+    let (signing_key, verifying_key) = if key_path.exists() {
+        // Load existing keypair
+        let sk_hex = fs::read_to_string(&key_path)?;
+        let sk_bytes: Vec<u8> = (0..sk_hex.trim().len())
+            .step_by(2)
+            .filter_map(|i| u8::from_str_radix(&sk_hex.trim()[i..i + 2], 16).ok())
+            .collect();
+        if sk_bytes.len() != 32 {
+            anyhow::bail!("Invalid signing key in .tbz/signing.key");
+        }
+        let mut key_array = [0u8; 32];
+        key_array.copy_from_slice(&sk_bytes);
+        let sk = tbz_core::SigningKey::from_bytes(&key_array);
+        let vk = sk.verifying_key();
+        println!("Using existing keypair from .tbz/");
+        (sk, vk)
+    } else {
+        // Generate new keypair
+        let (sk, vk) = signature::generate_keypair();
+
+        fs::create_dir_all(tbz_dir)?;
+        fs::write(&key_path, hex_encode(&sk.to_bytes()))?;
+        fs::write(&pub_path, hex_encode(&vk.to_bytes()))?;
+
+        println!("Generated Ed25519 keypair:");
+        println!("  Private: .tbz/signing.key (KEEP SECRET — add to .gitignore!)");
+        println!("  Public:  .tbz/signing.pub");
+        (sk, vk)
+    };
+
+    let vk_hex = hex_encode(&verifying_key.to_bytes());
+    let jis_id = format!("jis:ed25519:{}", &vk_hex[..16]);
+
+    // Sign the JIS identity claim
+    let claim_data = format!("{}:{}:{}:{}", platform, account, repo, vk_hex);
+    let claim_sig = signature::sign(claim_data.as_bytes(), &signing_key);
 
     let jis_json = serde_json::json!({
         "tbz": "1.0",
-        "jis_id": format!("jis:ed25519:{}", &vk_hex[..16]),
+        "jis_id": jis_id,
+        "signing_key": vk_hex,
         "claim": {
             "platform": platform,
             "account": account,
@@ -390,16 +477,31 @@ fn cmd_init(platform: &str, account: Option<String>, repo: Option<String>) -> an
         },
         "tibet": {
             "erin": "Repository identity binding",
-            "eraan": [format!("jis:ed25519:{}", &vk_hex[..16])],
+            "eraan": [&jis_id],
             "erachter": format!("Provenance root for TBZ packages from {}/{}", account, repo)
         },
-        "signature": "TODO: sign with private key",
+        "signature": hex_encode(&claim_sig),
         "timestamp": chrono_now()
     });
 
     let output = serde_json::to_string_pretty(&jis_json)?;
     fs::write(".jis.json", &output)?;
-    println!("Generated .jis.json:\n\n{}", output);
+
+    // Ensure .tbz/signing.key is in .gitignore
+    let gitignore = Path::new(".gitignore");
+    if gitignore.exists() {
+        let content = fs::read_to_string(gitignore)?;
+        if !content.contains(".tbz/signing.key") {
+            fs::write(gitignore, format!("{}\n# TBZ signing key (NEVER commit!)\n.tbz/signing.key\n", content.trim_end()))?;
+            println!("\n  Added .tbz/signing.key to .gitignore");
+        }
+    }
+
+    println!("\nGenerated .jis.json:");
+    println!("  JIS ID: {}", jis_id);
+    println!("  Claim: {}/{}/{}", platform, account, repo);
+    println!("  Signature: Ed25519 (signed)");
+
     Ok(())
 }
 
@@ -466,6 +568,10 @@ fn mime_for_path(path: &str) -> &str {
         Some("bin") => "application/octet-stream",
         _ => "application/octet-stream",
     }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 fn chrono_now() -> String {
