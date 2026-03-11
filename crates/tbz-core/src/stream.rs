@@ -6,7 +6,9 @@
 use crate::block::{Block, BlockError, BlockHeader};
 use crate::envelope::TibetEnvelope;
 use crate::manifest::Manifest;
+use crate::signature;
 use crate::{BlockType, MAGIC};
+use ed25519_dalek::SigningKey;
 use std::io::{Read, Write};
 use thiserror::Error;
 
@@ -28,13 +30,15 @@ pub enum StreamError {
 pub struct TbzWriter<W: Write> {
     inner: W,
     block_count: u32,
+    signing_key: SigningKey,
 }
 
 impl<W: Write> TbzWriter<W> {
-    pub fn new(inner: W) -> Self {
+    pub fn new(inner: W, signing_key: SigningKey) -> Self {
         Self {
             inner,
             block_count: 0,
+            signing_key,
         }
     }
 
@@ -47,7 +51,7 @@ impl<W: Write> TbzWriter<W> {
             .map_err(|e| StreamError::Io(e))?;
 
         let envelope = TibetEnvelope::new(
-            crate::signature::sha256_hash(&manifest_json),
+            signature::sha256_hash(&manifest_json),
             "manifest",
             "application/json",
             "tbz-packer",
@@ -97,18 +101,27 @@ impl<W: Write> TbzWriter<W> {
         envelope: &TibetEnvelope,
         compressed_payload: &[u8],
     ) -> Result<(), StreamError> {
+        // Serialize header and envelope
+        let header_json = serde_json::to_vec(header)
+            .map_err(|e| StreamError::Serialization(e.to_string()))?;
+        let envelope_json = serde_json::to_vec(envelope)
+            .map_err(|e| StreamError::Serialization(e.to_string()))?;
+
+        // Build signing payload: header + envelope + compressed data
+        let mut sign_data = Vec::new();
+        sign_data.extend_from_slice(&header_json);
+        sign_data.extend_from_slice(&envelope_json);
+        sign_data.extend_from_slice(compressed_payload);
+        let sig = signature::sign(&sign_data, &self.signing_key);
+
         // Write magic
         self.inner.write_all(&MAGIC)?;
 
-        // Write header as JSON (will be replaced with binary format later)
-        let header_json = serde_json::to_vec(header)
-            .map_err(|e| StreamError::Serialization(e.to_string()))?;
+        // Write header
         self.inner.write_all(&(header_json.len() as u32).to_le_bytes())?;
         self.inner.write_all(&header_json)?;
 
-        // Write envelope as JSON
-        let envelope_json = serde_json::to_vec(envelope)
-            .map_err(|e| StreamError::Serialization(e.to_string()))?;
+        // Write envelope
         self.inner.write_all(&(envelope_json.len() as u32).to_le_bytes())?;
         self.inner.write_all(&envelope_json)?;
 
@@ -116,11 +129,20 @@ impl<W: Write> TbzWriter<W> {
         self.inner.write_all(&(compressed_payload.len() as u64).to_le_bytes())?;
         self.inner.write_all(compressed_payload)?;
 
-        // Signature placeholder (TODO: real signing)
-        let sig_placeholder = vec![0u8; 64];
-        self.inner.write_all(&sig_placeholder)?;
+        // Write Ed25519 signature (64 bytes)
+        self.inner.write_all(&sig)?;
 
         Ok(())
+    }
+
+    /// Get the number of blocks written
+    pub fn block_count(&self) -> u32 {
+        self.block_count
+    }
+
+    /// Get the verifying (public) key for this writer
+    pub fn verifying_key(&self) -> ed25519_dalek::VerifyingKey {
+        self.signing_key.verifying_key()
     }
 
     /// Finalize and return the inner writer
@@ -178,9 +200,9 @@ impl<R: Read> TbzReader<R> {
         let mut payload = vec![0u8; payload_len];
         self.inner.read_exact(&mut payload)?;
 
-        // Read signature
-        let mut signature = vec![0u8; 64];
-        self.inner.read_exact(&mut signature)?;
+        // Read signature (64 bytes Ed25519)
+        let mut sig = vec![0u8; 64];
+        self.inner.read_exact(&mut sig)?;
 
         // Validate header
         header.validate()?;
@@ -189,7 +211,68 @@ impl<R: Read> TbzReader<R> {
             header,
             envelope,
             payload,
-            signature,
+            signature: sig,
         }))
+    }
+
+    /// Read all blocks from the stream
+    pub fn read_all_blocks(&mut self) -> Result<Vec<Block>, StreamError> {
+        let mut blocks = Vec::new();
+        while let Some(block) = self.read_block()? {
+            blocks.push(block);
+        }
+        Ok(blocks)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_roundtrip_write_read() {
+        let (signing_key, _) = signature::generate_keypair();
+
+        // Write a TBZ archive to memory
+        let mut buf = Vec::new();
+        {
+            let mut writer = TbzWriter::new(&mut buf, signing_key);
+
+            // Write manifest
+            let manifest = Manifest::new();
+            writer.write_manifest(&manifest).unwrap();
+
+            // Write a data block
+            let data = b"Hello from TBZ! This is block-level authenticated compression.";
+            let envelope = TibetEnvelope::new(
+                signature::sha256_hash(data),
+                "data",
+                "text/plain",
+                "test",
+                "Test data block",
+                vec!["block:0".to_string()],
+            );
+            writer.write_data_block(data, 0, &envelope).unwrap();
+
+            assert_eq!(writer.block_count(), 2);
+        }
+
+        // Read it back
+        let mut reader = TbzReader::new(buf.as_slice());
+        let blocks = reader.read_all_blocks().unwrap();
+
+        assert_eq!(blocks.len(), 2);
+
+        // Block 0: manifest
+        assert_eq!(blocks[0].header.block_type, BlockType::Manifest);
+        assert_eq!(blocks[0].header.jis_level, 0);
+
+        // Block 1: data
+        assert_eq!(blocks[1].header.block_type, BlockType::Data);
+        let decompressed = blocks[1].decompress().unwrap();
+        assert_eq!(
+            String::from_utf8(decompressed).unwrap(),
+            "Hello from TBZ! This is block-level authenticated compression."
+        );
     }
 }

@@ -8,6 +8,14 @@
 //!   tbz init                         Generate .jis.json for current repo
 
 use clap::{Parser, Subcommand};
+use std::fs;
+use std::io::BufWriter;
+use std::path::Path;
+
+use tbz_core::envelope::TibetEnvelope;
+use tbz_core::manifest::{BlockEntry, Manifest};
+use tbz_core::stream::{TbzReader, TbzWriter};
+use tbz_core::{signature, BlockType};
 
 #[derive(Parser)]
 #[command(name = "tbz")]
@@ -68,61 +76,402 @@ enum Commands {
 }
 
 fn main() -> anyhow::Result<()> {
-    // Initialize tracing
     tracing_subscriber::fmt::init();
 
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Pack { path, output, jis_level } => {
-            println!("TBZ pack: {} → {}", path, output);
-            println!("  JIS level: {}", jis_level);
+        Commands::Pack { path, output, jis_level } => cmd_pack(&path, &output, jis_level),
+        Commands::Unpack { archive, output } => cmd_unpack(&archive, &output),
+        Commands::Verify { archive } => cmd_verify(&archive),
+        Commands::Inspect { archive } => cmd_inspect(&archive),
+        Commands::Init { platform, account, repo } => cmd_init(&platform, account, repo),
+    }
+}
 
-            // Check for .jis.json
-            let jis_path = std::path::Path::new(".jis.json");
-            if jis_path.exists() {
-                println!("  .jis.json found — binding repository identity");
+/// Pack files into a TBZ archive
+fn cmd_pack(path: &str, output: &str, default_jis_level: u8) -> anyhow::Result<()> {
+    let source = Path::new(path);
+    if !source.exists() {
+        anyhow::bail!("Source path does not exist: {}", path);
+    }
+
+    // Collect files to pack
+    let files = collect_files(source)?;
+    println!("TBZ pack: {} file(s) from {}", files.len(), path);
+
+    // Check for .jis.json
+    let jis_manifest = tbz_jis::JisManifest::load(Path::new(".")).ok();
+    if let Some(ref jis) = jis_manifest {
+        println!("  .jis.json found: {}", jis.repo_identifier());
+    }
+
+    // Generate signing keypair for this archive
+    let (signing_key, verifying_key) = signature::generate_keypair();
+
+    // Build manifest
+    let mut manifest = Manifest::new();
+    for (i, (file_path, data)) in files.iter().enumerate() {
+        let jis_level = jis_manifest
+            .as_ref()
+            .map(|j| j.jis_level_for_path(file_path))
+            .unwrap_or(default_jis_level);
+
+        manifest.add_block(BlockEntry {
+            index: (i + 1) as u32,
+            block_type: "data".to_string(),
+            compressed_size: 0, // filled after compression
+            uncompressed_size: data.len() as u64,
+            jis_level,
+            description: file_path.clone(),
+            path: Some(file_path.clone()),
+        });
+    }
+
+    // Write TBZ archive
+    let out_file = fs::File::create(output)?;
+    let mut writer = TbzWriter::new(BufWriter::new(out_file), signing_key);
+
+    // Block 0: manifest
+    writer.write_manifest(&manifest)?;
+    println!("  [0] manifest ({} block entries)", manifest.blocks.len());
+
+    // Block 1..N: data
+    for (file_path, data) in &files {
+        let jis_level = jis_manifest
+            .as_ref()
+            .map(|j| j.jis_level_for_path(file_path))
+            .unwrap_or(default_jis_level);
+
+        let envelope = TibetEnvelope::new(
+            signature::sha256_hash(data),
+            "data",
+            mime_for_path(file_path),
+            "tbz-cli",
+            &format!("Pack file: {}", file_path),
+            vec!["block:0".to_string()],
+        );
+
+        let envelope = if let Some(ref jis) = jis_manifest {
+            envelope.with_source_repo(&jis.repo_identifier())
+        } else {
+            envelope
+        };
+
+        writer.write_data_block(data, jis_level, &envelope)?;
+        println!(
+            "  [{}] {} ({} bytes, JIS level {})",
+            writer.block_count() - 1,
+            file_path,
+            data.len(),
+            jis_level,
+        );
+    }
+
+    let total_blocks = writer.block_count();
+    writer.finish();
+
+    // Show public key (for verification)
+    let vk_bytes = verifying_key.to_bytes();
+    let vk_hex: String = vk_bytes.iter().map(|b| format!("{:02x}", b)).collect();
+
+    println!("\nArchive written: {}", output);
+    println!("  Blocks: {}", total_blocks);
+    println!("  Signing key (Ed25519 public): {}", vk_hex);
+    println!("  Format: TBZ v{}", tbz_core::VERSION);
+
+    Ok(())
+}
+
+/// Inspect a TBZ archive
+fn cmd_inspect(archive: &str) -> anyhow::Result<()> {
+    let file = fs::File::open(archive)?;
+    let mut reader = TbzReader::new(std::io::BufReader::new(file));
+
+    println!("TBZ inspect: {}\n", archive);
+    println!("  Magic: 0x54425A (TBZ)");
+    println!("  Format: v{}\n", tbz_core::VERSION);
+
+    let mut block_idx = 0;
+    while let Some(block) = reader.read_block()? {
+        let type_str = match block.header.block_type {
+            BlockType::Manifest => "MANIFEST",
+            BlockType::Data => "DATA",
+            BlockType::Nested => "NESTED",
+        };
+
+        println!("  Block {} [{}]", block.header.block_index, type_str);
+        println!("    JIS level:         {}", block.header.jis_level);
+        println!("    Compressed:        {} bytes", block.header.compressed_size);
+        println!("    Uncompressed:      {} bytes", block.header.uncompressed_size);
+        println!("    TIBET ERIN hash:   {}", block.envelope.erin.content_hash);
+        println!("    TIBET ERACHTER:    {}", block.envelope.erachter);
+
+        if let Some(ref repo) = block.envelope.eromheen.source_repo {
+            println!("    Source repo:       {}", repo);
+        }
+
+        // For manifest block, show the parsed manifest
+        if block.header.block_type == BlockType::Manifest {
+            if let Ok(decompressed) = block.decompress() {
+                if let Ok(manifest) = serde_json::from_slice::<Manifest>(&decompressed) {
+                    println!("    --- Manifest ---");
+                    println!("    Total blocks:      {}", manifest.block_count);
+                    println!("    Total uncompressed: {} bytes", manifest.total_uncompressed_size);
+                    println!("    Max JIS level:     {}", manifest.max_jis_level());
+                    for entry in &manifest.blocks {
+                        println!(
+                            "      [{:>3}] {} — {} bytes, JIS {}",
+                            entry.index,
+                            entry.path.as_deref().unwrap_or(&entry.description),
+                            entry.uncompressed_size,
+                            entry.jis_level,
+                        );
+                    }
+                }
             }
-
-            // TODO: implement packing
-            println!("  [not yet implemented — scaffold only]");
-            Ok(())
         }
 
-        Commands::Unpack { archive, output } => {
-            println!("TBZ unpack: {} → {}", archive, output);
+        // Signature present?
+        let sig_nonzero = block.signature.iter().any(|&b| b != 0);
+        println!("    Signature:         {}", if sig_nonzero { "Ed25519 (present)" } else { "none" });
+        println!();
 
-            // Show Airlock mode
-            let airlock = tbz_airlock::Airlock::new(256 * 1024 * 1024, 30);
-            println!("  Airlock mode: {:?}", airlock.mode());
+        block_idx += 1;
+    }
 
-            // TODO: implement unpacking
-            println!("  [not yet implemented — scaffold only]");
-            Ok(())
+    println!("  Total: {} blocks", block_idx);
+    Ok(())
+}
+
+/// Unpack a TBZ archive through the Airlock
+fn cmd_unpack(archive: &str, output_dir: &str) -> anyhow::Result<()> {
+    let file = fs::File::open(archive)?;
+    let mut reader = TbzReader::new(std::io::BufReader::new(file));
+
+    // Create Airlock
+    let mut airlock = tbz_airlock::Airlock::new(256 * 1024 * 1024, 30);
+    println!("TBZ unpack: {} → {}", archive, output_dir);
+    println!("  Airlock mode: {:?}\n", airlock.mode());
+
+    fs::create_dir_all(output_dir)?;
+
+    let mut block_idx = 0;
+    let mut manifest: Option<Manifest> = None;
+
+    while let Some(block) = reader.read_block()? {
+        match block.header.block_type {
+            BlockType::Manifest => {
+                let decompressed = block.decompress()?;
+                manifest = Some(serde_json::from_slice(&decompressed)
+                    .map_err(|e| anyhow::anyhow!("Invalid manifest: {}", e))?);
+                println!("  [0] Manifest parsed ({} entries)", manifest.as_ref().unwrap().blocks.len());
+            }
+            BlockType::Data => {
+                // Decompress into Airlock
+                let decompressed = block.decompress()?;
+                airlock.allocate(decompressed.len() as u64)?;
+                airlock.receive(&decompressed)?;
+
+                // Determine output path from manifest
+                let file_path = manifest
+                    .as_ref()
+                    .and_then(|m| {
+                        m.blocks.iter()
+                            .find(|e| e.index == block.header.block_index)
+                            .and_then(|e| e.path.clone())
+                    })
+                    .unwrap_or_else(|| format!("block_{}", block.header.block_index));
+
+                // Write from Airlock to filesystem
+                let out_path = Path::new(output_dir).join(&file_path);
+                if let Some(parent) = out_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+
+                let data = airlock.release(); // returns data + wipes buffer
+                fs::write(&out_path, &data)?;
+
+                println!(
+                    "  [{}] {} ({} bytes) ✓",
+                    block.header.block_index,
+                    file_path,
+                    data.len(),
+                );
+            }
+            BlockType::Nested => {
+                println!("  [{}] Nested TBZ (not yet supported)", block.header.block_index);
+            }
+        }
+        block_idx += 1;
+    }
+
+    println!("\n  Extracted {} blocks via Airlock", block_idx);
+    println!("  Airlock buffer: wiped (0x00)");
+    Ok(())
+}
+
+/// Verify a TBZ archive without extracting
+fn cmd_verify(archive: &str) -> anyhow::Result<()> {
+    let file = fs::File::open(archive)?;
+    let mut reader = TbzReader::new(std::io::BufReader::new(file));
+
+    println!("TBZ verify: {}\n", archive);
+
+    let mut errors = 0;
+    let mut block_idx = 0;
+
+    while let Some(block) = reader.read_block()? {
+        // Validate header
+        if let Err(e) = block.validate() {
+            println!("  [{}] FAIL: {}", block.header.block_index, e);
+            errors += 1;
+        } else {
+            // Verify content hash matches TIBET ERIN
+            match block.decompress() {
+                Ok(decompressed) => {
+                    let actual_hash = signature::sha256_hash(&decompressed);
+                    if actual_hash == block.envelope.erin.content_hash {
+                        println!("  [{}] OK — hash verified", block.header.block_index);
+                    } else {
+                        println!(
+                            "  [{}] FAIL — hash mismatch\n    expected: {}\n    actual:   {}",
+                            block.header.block_index,
+                            block.envelope.erin.content_hash,
+                            actual_hash,
+                        );
+                        errors += 1;
+                    }
+                }
+                Err(e) => {
+                    println!("  [{}] FAIL — decompress error: {}", block.header.block_index, e);
+                    errors += 1;
+                }
+            }
+        }
+        block_idx += 1;
+    }
+
+    println!();
+    if errors == 0 {
+        println!("  Result: ALL {} BLOCKS VERIFIED ✓", block_idx);
+    } else {
+        println!("  Result: {} ERRORS in {} blocks ✗", errors, block_idx);
+    }
+
+    Ok(())
+}
+
+/// Generate .jis.json for current repo
+fn cmd_init(platform: &str, account: Option<String>, repo: Option<String>) -> anyhow::Result<()> {
+    let account = account.unwrap_or_else(|| "<your-account>".to_string());
+    let repo = repo.unwrap_or_else(|| {
+        std::env::current_dir()
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .unwrap_or_else(|| "<repo>".to_string())
+    });
+
+    let (_, verifying_key) = signature::generate_keypair();
+    let vk_hex: String = verifying_key.to_bytes().iter().map(|b| format!("{:02x}", b)).collect();
+
+    let jis_json = serde_json::json!({
+        "tbz": "1.0",
+        "jis_id": format!("jis:ed25519:{}", &vk_hex[..16]),
+        "claim": {
+            "platform": platform,
+            "account": account,
+            "repo": repo,
+            "intent": "official_releases",
+            "sectors": {
+                "src/*": { "jis_level": 0, "description": "Public source code" },
+                "keys/*": { "jis_level": 2, "description": "Signing keys" }
+            }
+        },
+        "tibet": {
+            "erin": "Repository identity binding",
+            "eraan": [format!("jis:ed25519:{}", &vk_hex[..16])],
+            "erachter": format!("Provenance root for TBZ packages from {}/{}", account, repo)
+        },
+        "signature": "TODO: sign with private key",
+        "timestamp": chrono_now()
+    });
+
+    let output = serde_json::to_string_pretty(&jis_json)?;
+    fs::write(".jis.json", &output)?;
+    println!("Generated .jis.json:\n\n{}", output);
+    Ok(())
+}
+
+/// Collect files from a path (file or directory, recursive)
+fn collect_files(path: &Path) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
+    let mut files = Vec::new();
+
+    if path.is_file() {
+        let data = fs::read(path)?;
+        let name = path.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "file".to_string());
+        files.push((name, data));
+    } else if path.is_dir() {
+        collect_dir_recursive(path, path, &mut files)?;
+    }
+
+    Ok(files)
+}
+
+fn collect_dir_recursive(
+    base: &Path,
+    current: &Path,
+    files: &mut Vec<(String, Vec<u8>)>,
+) -> anyhow::Result<()> {
+    let mut entries: Vec<_> = fs::read_dir(current)?.collect::<Result<_, _>>()?;
+    entries.sort_by_key(|e| e.file_name());
+
+    for entry in entries {
+        let path = entry.path();
+        // Skip hidden files and common non-essential dirs
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') || name == "target" || name == "node_modules" {
+            continue;
         }
 
-        Commands::Verify { archive } => {
-            println!("TBZ verify: {}", archive);
-            // TODO: implement verification
-            println!("  [not yet implemented — scaffold only]");
-            Ok(())
-        }
-
-        Commands::Inspect { archive } => {
-            println!("TBZ inspect: {}", archive);
-            // TODO: implement inspection
-            println!("  [not yet implemented — scaffold only]");
-            Ok(())
-        }
-
-        Commands::Init { platform, account, repo } => {
-            println!("TBZ init: generating .jis.json");
-            println!("  Platform: {}", platform);
-            println!("  Account: {}", account.as_deref().unwrap_or("<detect>"));
-            println!("  Repo: {}", repo.as_deref().unwrap_or("<detect>"));
-            // TODO: implement init
-            println!("  [not yet implemented — scaffold only]");
-            Ok(())
+        if path.is_file() {
+            let rel = path.strip_prefix(base)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| name);
+            let data = fs::read(&path)?;
+            files.push((rel, data));
+        } else if path.is_dir() {
+            collect_dir_recursive(base, &path, files)?;
         }
     }
+    Ok(())
+}
+
+/// Simple MIME type detection
+fn mime_for_path(path: &str) -> &str {
+    match path.rsplit('.').next() {
+        Some("rs") => "text/x-rust",
+        Some("toml") => "application/toml",
+        Some("json") => "application/json",
+        Some("md") => "text/markdown",
+        Some("txt") => "text/plain",
+        Some("py") => "text/x-python",
+        Some("js") => "text/javascript",
+        Some("html") => "text/html",
+        Some("css") => "text/css",
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("bin") => "application/octet-stream",
+        _ => "application/octet-stream",
+    }
+}
+
+fn chrono_now() -> String {
+    use std::time::SystemTime;
+    let duration = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}Z", duration.as_secs())
 }
