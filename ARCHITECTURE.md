@@ -329,12 +329,15 @@ decentrale, Distributed Hash Table (DHT) netwerklaag.
 
 7. Technologie Stack
 
+  Taal           : Rust (pure-Rust stack, geen C/C++ dependencies)
   Compressie     : zstd (frame-based, onafhankelijke blokken, RFC 8878)
   Provenance     : TIBET (Token-based Intent & Bilateral Exchange Trust)
   Autorisatie    : JIS (bilateral consent per blok)
-  Handtekeningen : Ed25519
+  Handtekeningen : Ed25519 (ed25519-dalek)
+  Opslag         : sled (embedded pure-Rust key-value store)
   Distributie    : DHT (Distributed Hash Table) voor Transparency Mirror
-  Sandbox        : TIBET Airlock (zero-residue quarantine buffer)
+  Sandbox        : TIBET Airlock (eBPF kernel-level enforcement)
+  eBPF Toolchain : Aya (pure-Rust eBPF framework)
 
 ===============================================================================
 
@@ -447,6 +450,197 @@ Appendix C — Compatibility Matrix
   │ .rar / .7z        │ Airlock  │ Quarantine → Mirror check → re-sign │
   │ Onbekend formaat  │ Weiger   │ Geen extractie, alert               │
   └───────────────────┴──────────┴──────────────────────────────────────┘
+
+===============================================================================
+
+Appendix D — Implementatie-architectuur (Rust)
+
+D.1 Workspace Structuur
+
+  tbz/
+  ├── Cargo.toml                (workspace root)
+  ├── ARCHITECTURE.md
+  ├── .jis.json                 (eigen repository identity)
+  ├── crates/
+  │   ├── tbz-core/             Block format, TIBET envelope, zstd frames
+  │   ├── tbz-cli/              `tbz pack`, `tbz unpack`, `tbz verify`
+  │   ├── tbz-airlock/          eBPF userspace manager + Airlock lifecycle
+  │   ├── tbz-mirror/           Transparency Mirror (sled + DHT client)
+  │   └── tbz-jis/              JIS integratie, .jis.json parser, auth
+  ├── ebpf/
+  │   └── airlock.bpf.c         eBPF kernel programs (compiled via Aya)
+  └── tests/
+      ├── zombie_zip.rs         Test: malware block wordt gevangen
+      ├── streaming.rs          Test: pipeline decompressie
+      └── sector_auth.rs        Test: partiële extractie per JIS level
+
+D.2 Crate Verantwoordelijkheden
+
+  tbz-core:
+  - Block header serialisatie/deserialisatie (magic bytes, versie, types)
+  - TIBET envelope constructie en validatie
+  - zstd frame wrapping (via zstd-rs crate)
+  - Ed25519 signing/verificatie (via ed25519-dalek)
+  - Manifest parsing en generatie
+  - Streaming reader/writer traits
+
+  tbz-cli:
+  - `tbz pack <pad> -o output.tbz` — archief aanmaken
+  - `tbz unpack <archief.tbz>` — streaming extractie via Airlock
+  - `tbz verify <archief.tbz>` — valideer zonder uitpakken
+  - `tbz inspect <archief.tbz>` — manifest en blok-info tonen
+  - `tbz mirror status` — Transparency Mirror sync status
+  - `tbz init` — genereer .jis.json voor huidige repository
+
+  tbz-airlock:
+  - Userspace Airlock manager (buffer allocatie, lifecycle)
+  - eBPF programma laden/beheren via Aya
+  - 0x00 wipe implementatie (zeroize crate)
+  - Timeout management
+  - Legacy formaat detectie en quarantine flow
+
+  tbz-mirror:
+  - Lokale sled database voor bekende hashes
+  - DHT client voor gedistribueerde verificatie
+  - Attestation protocol (bijdragen + ontvangen)
+  - Cross-referencing met apt/PyPI/npm/Docker registries
+
+  tbz-jis:
+  - .jis.json parser en validator
+  - JIS level verificatie per blok
+  - Bilateral consent protocol integratie
+  - Repository identity binding
+
+D.3 Keuze: sled boven RocksDB
+
+  sled is gekozen als opslag-engine voor de Transparency Mirror omdat:
+
+  - Pure Rust: geen C/C++ dependencies, clean build chain
+  - Embedded: zero-config, geen aparte database server
+  - Concurrency: lock-free B+ tree, geschikt voor concurrent access
+  - Footprint: minimaal, past bij edge/embedded deployments
+  - Filosofie: past bij de pure-Rust stack zonder externe rommel
+
+  Als de DHT-nodes later miljoenen entries moeten handelen kan altijd
+  nog gemigreerd worden. Voor nu: clean stack, geen compromissen.
+
+===============================================================================
+
+Appendix E — eBPF TIBET Airlock (Kernel-level Enforcement)
+
+E.1 Waarom eBPF
+
+  Traditionele sandboxes draaien in userspace. Een kwaadaardig blok is al
+  in het proces-geheugen geladen voordat de sandbox het kan evalueren. Met
+  eBPF verplaatsen we de validatie naar de kernel:
+
+  Traditioneel:
+    download → userspace decompress → malware in RAM → oeps
+
+  TBZ + eBPF:
+    download → kernel eBPF hook → TIBET validate per block
+             → FAIL? → drop, bereikt userspace nooit
+             → PASS? → door naar Airlock buffer → 0x00 wipe na gebruik
+
+E.2 eBPF Hook Points
+
+  bpf_lsm (Linux Security Module):
+  - Hook op file_open, file_write, file_mmap
+  - Valideer TIBET token voordat data naar schijf/geheugen gaat
+  - Block writes naar niet-Airlock paden
+
+  execve:
+  - Blokkeer executie van niet-gevalideerde blokken
+  - Voorkom dat geëxtraheerde code direct uitgevoerd wordt
+  - Kleine execve wrapper voor gevalideerde blokken
+
+  openat / read / write:
+  - Intercept alle file I/O op Airlock-pad
+  - Afdwingen dat alleen het TBZ-proces naar Airlock kan schrijven
+  - Weiger reads van buiten het TBZ-proces
+
+  bpf_ringbuf:
+  - Communicatiekanaal kernel → userspace
+  - Validatie-resultaten terugsturen naar tbz-airlock manager
+  - Audit events voor logging
+
+E.3 Aya Framework
+
+  Aya is gekozen als eBPF toolchain:
+  - Pure Rust: eBPF userspace tooling zonder libbpf/C dependencies
+  - Type-safe: Rust type system voor eBPF programma's
+  - Aya-bpf: kernel-side helper crate
+  - Aya-log: structured logging vanuit eBPF naar userspace
+  - Cross-compilatie: eBPF bytecode generatie vanuit cargo build
+
+  Het eBPF kernel programma (ebpf/airlock.bpf.c) is het enige C-bestand
+  in de hele stack — onvermijdelijk voor de kernel-side, maar minimaal.
+
+E.4 Graceful Degradation
+
+  eBPF vereist Linux kernel >= 5.7 en CAP_BPF/CAP_SYS_ADMIN.
+  Als eBPF niet beschikbaar is (macOS, oudere kernels, geen root):
+
+  - Fallback naar userspace-only Airlock
+  - Zelfde lifecycle (allocate → validate → decide → wipe)
+  - Maar zonder kernel-level enforcement
+  - CLI toont waarschuwing: "Airlock draait in userspace mode"
+  - Functioneel identiek, maar minder geharde isolatie
+
+===============================================================================
+
+Appendix F — .jis.json Repository Identity Manifest
+
+F.1 Doel
+
+  Een .jis.json in de root van een repository bindt een JIS-identiteit
+  aan de broncode. Bij het inpakken met `tbz pack` wordt deze identiteit
+  de provenance-root voor alle blokken in het archief.
+
+F.2 Structuur
+
+  {
+    "tbz": "1.0",
+    "jis_id": "jis:ed25519:zK3a9fB2...",
+    "claim": {
+      "platform": "github",
+      "account": "jaspertvdm",
+      "repo": "tbz",
+      "intent": "official_releases",
+      "sectors": {
+        "src/*":   { "jis_level": 0, "description": "Public source code" },
+        "keys/*":  { "jis_level": 2, "description": "Signing keys" },
+        "data/*":  { "jis_level": 1, "description": "Licensed datasets" }
+      }
+    },
+    "tibet": {
+      "erin": "Repository identity binding",
+      "eraan": ["jis:ed25519:zK3a9fB2..."],
+      "erachter": "Provenance root for TBZ packages from this repo"
+    },
+    "signature": "sig_9f8a7b6c5d4e3f2a1b0c...",
+    "timestamp": "2026-03-11T11:49:10Z"
+  }
+
+F.3 Flow bij `tbz pack`
+
+  1. tbz-cli leest .jis.json — wie is de bron?
+  2. Valideert JIS signature — is deze manifest integer?
+  3. Elk blok erft de repo-identity als EROMHEEN context
+  4. Signature chain: repo .jis.json → manifest blok → data blokken
+  5. Transparency Mirror kan cross-checken:
+     "Dit package claimt van jaspertvdm/tbz te komen —
+      klopt dat met de .jis.json in die repo?"
+
+F.4 Sector Mapping
+
+  De "sectors" in .jis.json definiëren JIS-levels per pad-patroon.
+  Bij het inpakken:
+  - src/main.rs      → matcht "src/*"  → jis_level 0 (publiek)
+  - keys/signing.key → matcht "keys/*" → jis_level 2 (restricted)
+  - data/model.bin   → matcht "data/*" → jis_level 1 (licensed)
+
+  Bestanden zonder match krijgen het manifest-default level.
 
 ===============================================================================
 

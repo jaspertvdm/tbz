@@ -1,0 +1,18 @@
+[package]
+name = "tbz-airlock"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "TIBET Airlock: sandboxed decompression with eBPF kernel enforcement"
+
+[dependencies]
+tbz-core = { path = "../tbz-core" }
+zeroize.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+bytes.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

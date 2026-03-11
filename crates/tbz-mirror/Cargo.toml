@@ -1,0 +1,17 @@
+[package]
+name = "tbz-mirror"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "TIBET Transparency Mirror: sled-backed distributed trust database"
+
+[dependencies]
+tbz-core = { path = "../tbz-core" }
+sled.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true

@@ -1,0 +1,57 @@
+[workspace]
+members = [
+    "crates/tbz-core",
+    "crates/tbz-cli",
+    "crates/tbz-airlock",
+    "crates/tbz-mirror",
+    "crates/tbz-jis",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Jasper van de Meent <info@humotica.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jaspertvdm/tbz"
+description = "TBZ (TIBET-zip) — Block-level authenticated compression"
+
+[workspace.dependencies]
+# Compression
+zstd = "0.13"
+
+# Cryptography
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+sha2 = "0.10"
+rand = "0.8"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Storage
+sled = "0.34"
+
+# Secure memory
+zeroize = { version = "1", features = ["derive"] }
+
+# Async
+tokio = { version = "1", features = ["full"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# Byte handling
+bytes = "1"
+byteorder = "1"
+
+# Glob patterns (for .jis.json sector mapping)
+glob = "0.3"

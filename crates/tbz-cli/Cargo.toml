@@ -1,0 +1,23 @@
+[package]
+name = "tbz-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "TBZ command-line tool: pack, unpack, verify, inspect"
+
+[[bin]]
+name = "tbz"
+path = "src/main.rs"
+
+[dependencies]
+tbz-core = { path = "../tbz-core" }
+tbz-airlock = { path = "../tbz-airlock" }
+tbz-mirror = { path = "../tbz-mirror" }
+tbz-jis = { path = "../tbz-jis" }
+clap.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde_json.workspace = true
