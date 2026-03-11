@@ -32,14 +32,34 @@ tbz init --platform github --account you --repo yourproject
 # Pack a directory into a TBZ archive
 tbz pack ./src -o release.tbz
 
-# Inspect the archive structure
-tbz inspect release.tbz
-
 # Verify integrity (SHA-256 hashes + Ed25519 signatures)
 tbz verify release.tbz
 
 # Extract through the TIBET Airlock
 tbz unpack release.tbz -o ./extracted
+
+# Inspect the archive structure
+tbz inspect release.tbz
+```
+
+### Short aliases
+
+Because life is too short for `tar -xvf`:
+
+```bash
+tbz p ./src -o release.tbz    # pack
+tbz x release.tbz             # extract (unpack)
+tbz v release.tbz             # verify
+tbz i release.tbz             # inspect
+```
+
+### Smart mode
+
+Just give it a path — TBZ figures out what you want:
+
+```bash
+tbz release.tbz     # .tbz file → verify + unpack
+tbz ./src            # directory → pack
 ```
 
 ## Example Output

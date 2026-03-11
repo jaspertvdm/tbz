@@ -6,6 +6,16 @@
 //!   tbz verify <archive.tbz>         Validate without extracting
 //!   tbz inspect <archive.tbz>        Show manifest and block info
 //!   tbz init                         Generate .jis.json for current repo
+//!
+//! Short aliases (because life is too short for tar -xvf):
+//!   tbz p  = tbz pack
+//!   tbz x  = tbz unpack    (x for eXtract, like tar)
+//!   tbz v  = tbz verify
+//!   tbz i  = tbz inspect
+//!
+//! Smart defaults:
+//!   tbz archive.tbz          → auto-detects: verify + unpack
+//!   tbz ./src                → auto-detects: pack
 
 use clap::{Parser, Subcommand};
 use std::fs;
@@ -23,12 +33,17 @@ use tbz_core::{signature, BlockType};
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
+
+    /// Smart mode: pass a .tbz file to verify+unpack, or a directory to pack
+    #[arg(global = false)]
+    path: Option<String>,
 }
 
 #[derive(Subcommand)]
 enum Commands {
     /// Create a TBZ archive from a file or directory
+    #[command(alias = "p")]
     Pack {
         /// Path to file or directory to archive
         path: String,
@@ -41,6 +56,7 @@ enum Commands {
     },
 
     /// Extract a TBZ archive via the TIBET Airlock
+    #[command(alias = "x")]
     Unpack {
         /// Path to the TBZ archive
         archive: String,
@@ -50,12 +66,14 @@ enum Commands {
     },
 
     /// Validate a TBZ archive without extracting
+    #[command(alias = "v")]
     Verify {
         /// Path to the TBZ archive
         archive: String,
     },
 
     /// Show manifest and block information
+    #[command(alias = "i")]
     Inspect {
         /// Path to the TBZ archive
         archive: String,
@@ -80,13 +98,56 @@ fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    match cli.command {
-        Commands::Pack { path, output, jis_level } => cmd_pack(&path, &output, jis_level),
-        Commands::Unpack { archive, output } => cmd_unpack(&archive, &output),
-        Commands::Verify { archive } => cmd_verify(&archive),
-        Commands::Inspect { archive } => cmd_inspect(&archive),
-        Commands::Init { platform, account, repo } => cmd_init(&platform, account, repo),
+    // If a subcommand was given, use it directly
+    if let Some(command) = cli.command {
+        return match command {
+            Commands::Pack { path, output, jis_level } => cmd_pack(&path, &output, jis_level),
+            Commands::Unpack { archive, output } => cmd_unpack(&archive, &output),
+            Commands::Verify { archive } => cmd_verify(&archive),
+            Commands::Inspect { archive } => cmd_inspect(&archive),
+            Commands::Init { platform, account, repo } => cmd_init(&platform, account, repo),
+        };
     }
+
+    // Smart auto-detection: tbz <path>
+    if let Some(path) = cli.path {
+        let p = Path::new(&path);
+        if path.ends_with(".tbz") && p.is_file() {
+            // .tbz file → verify, then unpack
+            println!("Auto-detected: .tbz archive → verify + unpack\n");
+            cmd_verify(&path)?;
+            println!();
+            let out_dir = p.file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "tbz_out".to_string());
+            cmd_unpack(&path, &out_dir)?;
+            return Ok(());
+        } else if p.is_dir() {
+            // Directory → pack
+            let dir_name = p.file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "output".to_string());
+            let output = format!("{}.tbz", dir_name);
+            println!("Auto-detected: directory → pack to {}\n", output);
+            cmd_pack(&path, &output, 0)?;
+            return Ok(());
+        } else if p.is_file() {
+            // Single file → pack
+            let file_name = p.file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "output".to_string());
+            let output = format!("{}.tbz", file_name);
+            println!("Auto-detected: file → pack to {}\n", output);
+            cmd_pack(&path, &output, 0)?;
+            return Ok(());
+        } else {
+            anyhow::bail!("Path not found: {}", path);
+        }
+    }
+
+    // No subcommand and no path — show help
+    Cli::parse_from(["tbz", "--help"]);
+    Ok(())
 }
 
 /// Pack files into a TBZ archive

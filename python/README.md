@@ -48,6 +48,16 @@ git clone https://github.com/jaspertvdm/tbz
 cd tbz && cargo build --release
 export PATH=$PATH:$(pwd)/target/release
 
+# Short aliases (because life is too short for tar -xvf)
+tbz p ./src -o release.tbz    # pack
+tbz x release.tbz             # extract
+tbz v release.tbz             # verify
+tbz i release.tbz             # inspect
+
+# Smart mode — just give it a path
+tbz release.tbz               # .tbz file → verify + unpack
+tbz ./src                     # directory → pack
+
 # Then in Python
 archive = TBZArchive("release.tbz")
 result = archive.verify()  # Full Ed25519 + SHA-256 verification
