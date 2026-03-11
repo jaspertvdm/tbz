@@ -10,7 +10,7 @@ keywords = ["security", "sandbox", "decompression", "ebpf", "zero-trust"]
 categories = ["os", "cryptography"]
 
 [dependencies]
-tbz-core = { path = "../tbz-core", version = "0.1.0" }
+tbz-core = { path = "../tbz-core", version = "0.1.1" }
 zeroize.workspace = true
 tokio.workspace = true
 thiserror.workspace = true

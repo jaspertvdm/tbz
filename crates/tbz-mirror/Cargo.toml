@@ -10,7 +10,7 @@ keywords = ["security", "transparency", "supply-chain", "provenance", "zero-trus
 categories = ["database", "cryptography"]
 
 [dependencies]
-tbz-core = { path = "../tbz-core", version = "0.1.0" }
+tbz-core = { path = "../tbz-core", version = "0.1.1" }
 sled.workspace = true
 serde.workspace = true
 serde_json.workspace = true
