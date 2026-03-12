@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "../../README.md"
 description = "TBZ command-line tool: pack, unpack, verify, inspect"
 keywords = ["compression", "security", "cli", "archive", "zero-trust"]
 categories = ["command-line-utilities", "compression", "cryptography"]
@@ -14,10 +15,10 @@ name = "tbz"
 path = "src/main.rs"
 
 [dependencies]
-tbz-core = { path = "../tbz-core", version = "0.1.1" }
-tbz-airlock = { path = "../tbz-airlock", version = "0.1.1" }
-tbz-mirror = { path = "../tbz-mirror", version = "0.1.1" }
-tbz-jis = { path = "../tbz-jis", version = "0.1.1" }
+tbz-core = { path = "../tbz-core", version = "0.1.2" }
+tbz-airlock = { path = "../tbz-airlock", version = "0.1.2" }
+tbz-mirror = { path = "../tbz-mirror", version = "0.1.2" }
+tbz-jis = { path = "../tbz-jis", version = "0.1.2" }
 clap.workspace = true
 tokio.workspace = true
 anyhow.workspace = true

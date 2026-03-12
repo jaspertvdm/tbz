@@ -5,12 +5,13 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "../../README.md"
 description = "JIS integration: .jis.json parser, authorization, repository identity binding"
 keywords = ["security", "identity", "authorization", "provenance", "zero-trust"]
 categories = ["authentication", "cryptography"]
 
 [dependencies]
-tbz-core = { path = "../tbz-core", version = "0.1.1" }
+tbz-core = { path = "../tbz-core", version = "0.1.2" }
 ed25519-dalek.workspace = true
 serde.workspace = true
 serde_json.workspace = true

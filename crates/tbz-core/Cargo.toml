@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "../../README.md"
 description = "Core TBZ block format, TIBET envelope, and zstd frame handling"
 keywords = ["compression", "security", "provenance", "ed25519", "zero-trust"]
 categories = ["compression", "cryptography", "encoding"]
