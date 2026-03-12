@@ -19,13 +19,103 @@
 
 use clap::{Parser, Subcommand};
 use std::fs;
-use std::io::BufWriter;
+use std::io::{BufReader, BufWriter, Read as _};
 use std::path::Path;
 
+use sha2::{Digest, Sha256};
 use tbz_core::envelope::TibetEnvelope;
 use tbz_core::manifest::{BlockEntry, Manifest};
 use tbz_core::stream::{TbzReader, TbzWriter};
 use tbz_core::{signature, BlockType};
+
+// ---------------------------------------------------------------------------
+// Transparency Mirror client (best-effort HTTP, never a hard error)
+// ---------------------------------------------------------------------------
+mod mirror_client {
+    use serde::{Deserialize, Serialize};
+
+    const TIMEOUT_SECS: u64 = 5;
+
+    #[derive(Serialize)]
+    pub struct RegisterPayload {
+        pub content_hash: String,
+        pub signing_key: String,
+        pub jis_id: Option<String>,
+        pub source_repo: Option<String>,
+        pub block_count: u32,
+        pub total_size: u64,
+    }
+
+    #[derive(Deserialize)]
+    pub struct RegisterResponse {
+        pub status: String, // "registered" | "already_registered"
+    }
+
+    #[derive(Deserialize)]
+    pub struct LookupEntry {
+        pub content_hash: String,
+        pub first_seen: String,
+        pub attestations: Vec<LookupAttestation>,
+    }
+
+    #[derive(Deserialize)]
+    pub struct LookupAttestation {
+        pub verdict: String,
+    }
+
+    pub fn register(base_url: &str, payload: &RegisterPayload) -> Result<RegisterResponse, String> {
+        let url = format!("{}/api/tbz-mirror/register", base_url.trim_end_matches('/'));
+        let resp = ureq::post(&url)
+            .timeout(std::time::Duration::from_secs(TIMEOUT_SECS))
+            .send_json(serde_json::json!({
+                "content_hash": payload.content_hash,
+                "signing_key": payload.signing_key,
+                "jis_id": payload.jis_id,
+                "source_repo": payload.source_repo,
+                "block_count": payload.block_count,
+                "total_size": payload.total_size,
+            }))
+            .map_err(|e| e.to_string())?;
+
+        resp.into_json::<RegisterResponse>().map_err(|e| e.to_string())
+    }
+
+    pub fn lookup(base_url: &str, hash: &str) -> Result<Option<LookupEntry>, String> {
+        let url = format!(
+            "{}/api/tbz-mirror/lookup/{}",
+            base_url.trim_end_matches('/'),
+            hash,
+        );
+        let resp = ureq::get(&url)
+            .timeout(std::time::Duration::from_secs(TIMEOUT_SECS))
+            .call();
+
+        match resp {
+            Ok(r) => {
+                let entry = r.into_json::<LookupEntry>().map_err(|e| e.to_string())?;
+                Ok(Some(entry))
+            }
+            Err(ureq::Error::Status(404, _)) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+}
+
+/// Compute SHA-256 of a file on disk (streaming, 8 KB chunks).
+fn hash_file(path: &Path) -> anyhow::Result<String> {
+    let file = fs::File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
 
 #[derive(Parser)]
 #[command(name = "tbz")]
@@ -38,6 +128,15 @@ struct Cli {
     /// Smart mode: pass a .tza file to verify+unpack, or a directory to pack
     #[arg(global = false)]
     path: Option<String>,
+
+    /// Transparency Mirror base URL (also via TBZ_MIRROR_URL env)
+    #[arg(long, global = true, env = "TBZ_MIRROR_URL",
+          default_value = "https://brein.jaspervandemeent.nl")]
+    mirror_url: String,
+
+    /// Disable Transparency Mirror lookups/registration
+    #[arg(long, global = true, default_value_t = false)]
+    no_mirror: bool,
 }
 
 #[derive(Subcommand)]
@@ -98,12 +197,19 @@ fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
+    // Resolve mirror URL once (None = disabled)
+    let mirror_url: Option<&str> = if cli.no_mirror {
+        None
+    } else {
+        Some(&cli.mirror_url)
+    };
+
     // If a subcommand was given, use it directly
     if let Some(command) = cli.command {
         return match command {
-            Commands::Pack { path, output, jis_level } => cmd_pack(&path, &output, jis_level),
+            Commands::Pack { path, output, jis_level } => cmd_pack(&path, &output, jis_level, mirror_url),
             Commands::Unpack { archive, output } => cmd_unpack(&archive, &output),
-            Commands::Verify { archive } => cmd_verify(&archive),
+            Commands::Verify { archive } => cmd_verify(&archive, mirror_url),
             Commands::Inspect { archive } => cmd_inspect(&archive),
             Commands::Init { platform, account, repo } => cmd_init(&platform, account, repo),
         };
@@ -115,7 +221,7 @@ fn main() -> anyhow::Result<()> {
         if (path.ends_with(".tza") || path.ends_with(".tbz")) && p.is_file() {
             // .tza file → verify, then unpack
             println!("Auto-detected: .tza archive → verify + unpack\n");
-            cmd_verify(&path)?;
+            cmd_verify(&path, mirror_url)?;
             println!();
             let out_dir = p.file_stem()
                 .map(|s| s.to_string_lossy().to_string())
@@ -129,7 +235,7 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|| "output".to_string());
             let output = format!("{}.tza", dir_name);
             println!("Auto-detected: directory → pack to {}\n", output);
-            cmd_pack(&path, &output, 0)?;
+            cmd_pack(&path, &output, 0, mirror_url)?;
             return Ok(());
         } else if p.is_file() {
             // Single file → pack
@@ -138,7 +244,7 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|| "output".to_string());
             let output = format!("{}.tza", file_name);
             println!("Auto-detected: file → pack to {}\n", output);
-            cmd_pack(&path, &output, 0)?;
+            cmd_pack(&path, &output, 0, mirror_url)?;
             return Ok(());
         } else {
             anyhow::bail!("Path not found: {}", path);
@@ -151,7 +257,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// Pack files into a TBZ archive
-fn cmd_pack(path: &str, output: &str, default_jis_level: u8) -> anyhow::Result<()> {
+fn cmd_pack(path: &str, output: &str, default_jis_level: u8, mirror_url: Option<&str>) -> anyhow::Result<()> {
     let source = Path::new(path);
     if !source.exists() {
         anyhow::bail!("Source path does not exist: {}", path);
@@ -242,6 +348,31 @@ fn cmd_pack(path: &str, output: &str, default_jis_level: u8) -> anyhow::Result<(
     println!("  Blocks: {}", total_blocks);
     println!("  Signing key (Ed25519 public): {}", vk_hex);
     println!("  Format: TBZ v{}", tbz_core::VERSION);
+
+    // --- Transparency Mirror registration (best-effort) ---
+    if let Some(url) = mirror_url {
+        let archive_hash = hash_file(Path::new(output))?;
+        println!("\n  Mirror: registering {} ...", archive_hash);
+
+        let jis_id = jis_manifest.as_ref().map(|_| {
+            format!("jis:ed25519:{}", &vk_hex[..16])
+        });
+        let source_repo = jis_manifest.as_ref().map(|j| j.repo_identifier());
+
+        let payload = mirror_client::RegisterPayload {
+            content_hash: archive_hash,
+            signing_key: vk_hex.clone(),
+            jis_id,
+            source_repo,
+            block_count: total_blocks as u32,
+            total_size: fs::metadata(output).map(|m| m.len()).unwrap_or(0),
+        };
+
+        match mirror_client::register(url, &payload) {
+            Ok(resp) => println!("  Mirror: {} ({})", resp.status, url),
+            Err(e) => println!("  Mirror: WARNING — {}", e),
+        }
+    }
 
     Ok(())
 }
@@ -375,7 +506,7 @@ fn cmd_unpack(archive: &str, output_dir: &str) -> anyhow::Result<()> {
 }
 
 /// Verify a TBZ archive without extracting
-fn cmd_verify(archive: &str) -> anyhow::Result<()> {
+fn cmd_verify(archive: &str, mirror_url: Option<&str>) -> anyhow::Result<()> {
     let file = fs::File::open(archive)?;
     let mut reader = TbzReader::new(std::io::BufReader::new(file));
 
@@ -465,6 +596,32 @@ fn cmd_verify(archive: &str) -> anyhow::Result<()> {
         }
     } else {
         println!("  Result: {} ERRORS in {} blocks ✗", errors, block_idx);
+    }
+
+    // --- Transparency Mirror lookup (best-effort) ---
+    if let Some(url) = mirror_url {
+        let archive_hash = hash_file(Path::new(archive))?;
+        match mirror_client::lookup(url, &archive_hash) {
+            Ok(Some(entry)) => {
+                let verdicts: Vec<&str> = entry.attestations.iter()
+                    .map(|a| a.verdict.as_str())
+                    .collect();
+                println!("\n  Mirror: KNOWN");
+                println!("    Hash:         {}", entry.content_hash);
+                println!("    First seen:   {}", entry.first_seen);
+                println!(
+                    "    Attestations: {} ({})",
+                    entry.attestations.len(),
+                    if verdicts.is_empty() { "none".to_string() } else { verdicts.join(", ") },
+                );
+            }
+            Ok(None) => {
+                println!("\n  Mirror: UNKNOWN — not registered in Transparency Mirror");
+            }
+            Err(e) => {
+                println!("\n  Mirror: WARNING — {}", e);
+            }
+        }
     }
 
     Ok(())

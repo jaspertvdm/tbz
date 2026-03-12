@@ -3,44 +3,33 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "tbz"
+name = "tibet-zip"
 version = "0.1.4"
-description = "TBZ (TIBET-zip) — Block-level authenticated compression for the Zero-Trust era"
+description = "TIBET-zip — alias package for tbz (block-level authenticated compression)"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
 requires-python = ">=3.9"
 authors = [
     {name = "Jasper van de Meent", email = "jasper@humotica.nl"},
 ]
-keywords = ["compression", "security", "provenance", "supply-chain", "zero-trust", "ed25519"]
+keywords = ["compression", "security", "provenance", "supply-chain", "zero-trust", "tibet", "ed25519"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Intended Audience :: System Administrators",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
     "Programming Language :: Rust",
     "Topic :: Security",
     "Topic :: Security :: Cryptography",
     "Topic :: System :: Archiving :: Compression",
 ]
 dependencies = [
-    "requests>=2.28.0",
+    "tbz==0.1.4",
 ]
-
-[project.optional-dependencies]
-dev = ["pytest>=7.0", "pytest-cov"]
 
 [project.urls]
 Homepage = "https://github.com/jaspertvdm/tbz"
 Repository = "https://github.com/jaspertvdm/tbz"
 Issues = "https://github.com/jaspertvdm/tbz/issues"
 Documentation = "https://github.com/jaspertvdm/tbz/blob/main/ARCHITECTURE.md"
-
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["tbz*"]

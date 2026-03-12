@@ -17,7 +17,7 @@ Usage:
     entry = mirror.lookup("sha256:abc123...")
 """
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 __author__ = "Jasper van de Meent"
 
 from tbz.archive import TBZArchive
