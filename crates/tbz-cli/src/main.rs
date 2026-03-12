@@ -1,10 +1,10 @@
 //! tbz — TBZ command-line tool
 //!
 //! Usage:
-//!   tbz pack <path> -o output.tbz    Create a TBZ archive
-//!   tbz unpack <archive.tbz>         Extract via TIBET Airlock
-//!   tbz verify <archive.tbz>         Validate without extracting
-//!   tbz inspect <archive.tbz>        Show manifest and block info
+//!   tbz pack <path> -o output.tza    Create a TBZ archive
+//!   tbz unpack <archive.tza>         Extract via TIBET Airlock
+//!   tbz verify <archive.tza>         Validate without extracting
+//!   tbz inspect <archive.tza>        Show manifest and block info
 //!   tbz init                         Generate .jis.json for current repo
 //!
 //! Short aliases (because life is too short for tar -xvf):
@@ -14,7 +14,7 @@
 //!   tbz i  = tbz inspect
 //!
 //! Smart defaults:
-//!   tbz archive.tbz          → auto-detects: verify + unpack
+//!   tbz archive.tza          → auto-detects: verify + unpack
 //!   tbz ./src                → auto-detects: pack
 
 use clap::{Parser, Subcommand};
@@ -35,7 +35,7 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
-    /// Smart mode: pass a .tbz file to verify+unpack, or a directory to pack
+    /// Smart mode: pass a .tza file to verify+unpack, or a directory to pack
     #[arg(global = false)]
     path: Option<String>,
 }
@@ -48,7 +48,7 @@ enum Commands {
         /// Path to file or directory to archive
         path: String,
         /// Output file path
-        #[arg(short, long, default_value = "output.tbz")]
+        #[arg(short, long, default_value = "output.tza")]
         output: String,
         /// JIS authorization level for all blocks (default: 0)
         #[arg(long, default_value = "0")]
@@ -112,9 +112,9 @@ fn main() -> anyhow::Result<()> {
     // Smart auto-detection: tbz <path>
     if let Some(path) = cli.path {
         let p = Path::new(&path);
-        if path.ends_with(".tbz") && p.is_file() {
-            // .tbz file → verify, then unpack
-            println!("Auto-detected: .tbz archive → verify + unpack\n");
+        if (path.ends_with(".tza") || path.ends_with(".tbz")) && p.is_file() {
+            // .tza file → verify, then unpack
+            println!("Auto-detected: .tza archive → verify + unpack\n");
             cmd_verify(&path)?;
             println!();
             let out_dir = p.file_stem()
@@ -127,7 +127,7 @@ fn main() -> anyhow::Result<()> {
             let dir_name = p.file_name()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| "output".to_string());
-            let output = format!("{}.tbz", dir_name);
+            let output = format!("{}.tza", dir_name);
             println!("Auto-detected: directory → pack to {}\n", output);
             cmd_pack(&path, &output, 0)?;
             return Ok(());
@@ -136,7 +136,7 @@ fn main() -> anyhow::Result<()> {
             let file_name = p.file_stem()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| "output".to_string());
-            let output = format!("{}.tbz", file_name);
+            let output = format!("{}.tza", file_name);
             println!("Auto-detected: file → pack to {}\n", output);
             cmd_pack(&path, &output, 0)?;
             return Ok(());

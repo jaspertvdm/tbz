@@ -791,7 +791,7 @@ dependencies = [
 
 [[package]]
 name = "tbz-airlock"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "bytes",
  "libc",
@@ -804,7 +804,7 @@ dependencies = [
 
 [[package]]
 name = "tbz-cli"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -820,7 +820,7 @@ dependencies = [
 
 [[package]]
 name = "tbz-core"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "byteorder",
  "bytes",
@@ -836,7 +836,7 @@ dependencies = [
 
 [[package]]
 name = "tbz-jis"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "ed25519-dalek",
  "glob",
@@ -849,7 +849,7 @@ dependencies = [
 
 [[package]]
 name = "tbz-mirror"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "serde",
  "serde_json",

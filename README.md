@@ -35,16 +35,16 @@ pip install tbz              # Python (inspect + Mirror client)
 tbz init --platform github --account you --repo yourproject
 
 # Pack a directory into a TBZ archive
-tbz pack ./src -o release.tbz
+tbz pack ./src -o release.tza
 
 # Verify integrity (SHA-256 hashes + Ed25519 signatures)
-tbz verify release.tbz
+tbz verify release.tza
 
 # Extract through the TIBET Airlock
-tbz unpack release.tbz -o ./extracted
+tbz unpack release.tza -o ./extracted
 
 # Inspect the archive structure
-tbz inspect release.tbz
+tbz inspect release.tza
 ```
 
 ### Short aliases
@@ -52,10 +52,10 @@ tbz inspect release.tbz
 Because life is too short for `tar -xvf`:
 
 ```bash
-tbz p ./src -o release.tbz    # pack
-tbz x release.tbz             # extract (unpack)
-tbz v release.tbz             # verify
-tbz i release.tbz             # inspect
+tbz p ./src -o release.tza    # pack
+tbz x release.tza             # extract (unpack)
+tbz v release.tza             # verify
+tbz i release.tza             # inspect
 ```
 
 ### Smart mode
@@ -63,16 +63,16 @@ tbz i release.tbz             # inspect
 Just give it a path — TBZ figures out what you want:
 
 ```bash
-tbz release.tbz     # .tbz file → verify + unpack
+tbz release.tza     # .tza file → verify + unpack
 tbz ./src            # directory → pack
 ```
 
 ## Example Output
 
 ```
-$ tbz verify release.tbz
+$ tbz verify release.tza
 
-TBZ verify: release.tbz
+TBZ verify: release.tza
 
   Signing key: Ed25519 77214ce9c262843e
 
@@ -85,7 +85,7 @@ TBZ verify: release.tbz
 
 Tampered archive detection:
 ```
-$ tbz verify tampered.tbz
+$ tbz verify tampered.tza
 
   [0] OK — hash + signature verified
   [1] FAIL signature: block header tampered
@@ -116,7 +116,7 @@ Block 0 is always the **Manifest** — the signed index of the archive containin
 from tbz import TBZArchive, Mirror
 
 # Inspect (pure Python, no binary needed)
-archive = TBZArchive("release.tbz")
+archive = TBZArchive("release.tza")
 info = archive.inspect()
 print(f"Blocks: {info['block_count']}, Hash: {info['content_hash']}")
 

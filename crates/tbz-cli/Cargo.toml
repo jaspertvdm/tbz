@@ -15,10 +15,10 @@ name = "tbz"
 path = "src/main.rs"
 
 [dependencies]
-tbz-core = { path = "../tbz-core", version = "0.1.2" }
-tbz-airlock = { path = "../tbz-airlock", version = "0.1.2" }
-tbz-mirror = { path = "../tbz-mirror", version = "0.1.2" }
-tbz-jis = { path = "../tbz-jis", version = "0.1.2" }
+tbz-core = { path = "../tbz-core", version = "0.1.3" }
+tbz-airlock = { path = "../tbz-airlock", version = "0.1.3" }
+tbz-mirror = { path = "../tbz-mirror", version = "0.1.3" }
+tbz-jis = { path = "../tbz-jis", version = "0.1.3" }
 clap.workspace = true
 tokio.workspace = true
 anyhow.workspace = true

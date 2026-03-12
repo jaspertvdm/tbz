@@ -8,7 +8,7 @@ Usage:
     from tbz import TBZArchive, Mirror
 
     # Verify an archive
-    archive = TBZArchive("release.tbz")
+    archive = TBZArchive("release.tza")
     result = archive.verify()
     print(result)
 
@@ -17,7 +17,7 @@ Usage:
     entry = mirror.lookup("sha256:abc123...")
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.3"
 __author__ = "Jasper van de Meent"
 
 from tbz.archive import TBZArchive

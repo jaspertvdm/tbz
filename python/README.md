@@ -18,7 +18,7 @@ pip install tbz
 | Inspect archive structure | yes | yes |
 | SHA-256 hash verification | yes | yes |
 | Ed25519 signature verification | — | yes |
-| Pack files into .tbz | — | yes |
+| Pack files into .tza | — | yes |
 | Unpack via TIBET Airlock | — | yes |
 | Transparency Mirror client | yes | yes |
 
@@ -31,7 +31,7 @@ Pure Python works standalone — no binary needed. Add the Rust CLI for full cry
 ```python
 from tbz import TBZArchive
 
-archive = TBZArchive("release.tbz")
+archive = TBZArchive("release.tza")
 
 # Inspect: read block headers (pure Python)
 info = archive.inspect()
@@ -74,7 +74,7 @@ print(f"Node: {stats['node']}, entries: {stats['total_entries']}")
 
 ```python
 # Pack
-archive = TBZArchive.pack("./src", output="release.tbz")
+archive = TBZArchive.pack("./src", output="release.tza")
 
 # Unpack through TIBET Airlock (quarantine buffer, 0x00 wipe on failure)
 archive.unpack("./extracted")
@@ -91,12 +91,12 @@ cargo install tbz-cli
 Then you get short aliases and smart mode:
 
 ```bash
-tbz p ./src -o release.tbz    # pack
-tbz x release.tbz             # extract
-tbz v release.tbz             # verify
-tbz i release.tbz             # inspect
+tbz p ./src -o release.tza    # pack
+tbz x release.tza             # extract
+tbz v release.tza             # verify
+tbz i release.tza             # inspect
 
-tbz release.tbz               # smart: verify + unpack
+tbz release.tza               # smart: verify + unpack
 tbz ./src                     # smart: pack
 ```
 

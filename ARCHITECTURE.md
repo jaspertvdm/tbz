@@ -59,7 +59,7 @@ Het ecosysteem bestaat uit drie onlosmakelijk verbonden lagen:
 
 3. Architectuur van het TBZ Formaat
 
-Het .tbz (TIBET-zip) formaat is geen nieuw compressie-algoritme, maar een
+Het .tza (TIBET Zip Archive) formaat is geen nieuw compressie-algoritme, maar een
 semantische beveiligingsschil rondom bewezen technologie (zstd). Het maakt
 gebruik van onafhankelijke frames om streaming validation mogelijk te maken.
 
@@ -188,7 +188,7 @@ functioneert de TIBET Airlock als een meedogenloze grenscontrole.
     (de Quarantine Buffer) uitgepakt.
   - Het systeem voert een validatie uit tegen de Transparency Mirror.
   - Bij een succesvolle validatie wordt de data on-the-fly omgezet naar een
-    veilig .tbz formaat, getekend met de JIS-identiteit van de lokale sandbox.
+    veilig .tza formaat, getekend met de JIS-identiteit van de lokale sandbox.
   - Bij falen (bijv. een Zip-bomb of Zombie ZIP manipulatie) wordt de buffer
     direct overschreven met nullen (0x00 wipe) om geheugen-exploits te
     voorkomen. Het bestandssysteem (de harde schijf) wordt nooit geraakt.
@@ -352,11 +352,11 @@ decentrale, Distributed Hash Table (DHT) netwerklaag.
   │ .tar.gz.sig  │ Archief-level GPG signature. Alles of niets.        │
   │ .zip         │ Optionele per-file CRC. Geen authenticatie.         │
   │ .zst         │ Integriteit via checksums. Geen provenance.         │
-  │ .tbz         │ Per-blok TIBET provenance + JIS autorisatie.        │
+  │ .tza         │ Per-blok TIBET provenance + JIS autorisatie.        │
   │              │ Fail-fast. Streaming. Sector access control.         │
   └──────────────┴──────────────────────────────────────────────────────┘
 
-  TBZ is bewust incompatibel met legacy tools. Je kunt een .tbz niet
+  TBZ is bewust incompatibel met legacy tools. Je kunt een .tza niet
   per ongeluk uitpakken met tar of 7zip. Nieuw formaat, nieuw trust-
   model, geen sluiproutes.
 
@@ -413,7 +413,7 @@ Appendix A — IETF Overwegingen
 
   IETF registraties:
   - Media type: application/tbz
-  - Bestandsextensie: .tbz
+  - Bestandsextensie: .tza
   - Magic bytes: 0x54425A (ASCII "TBZ")
   - Streaming compatibiliteit met HTTP chunked transfer encoding
   - Content-Encoding negotiation voor TBZ-aware servers
@@ -444,8 +444,8 @@ Appendix C — Compatibility Matrix
   ┌───────────────────┬──────────┬──────────────────────────────────────┐
   │ Invoer            │ Actie    │ Resultaat                            │
   ├───────────────────┼──────────┼──────────────────────────────────────┤
-  │ .tbz              │ Direct   │ Streaming validate + extract         │
-  │ .tbz-deep         │ Direct   │ Nested validate via TIBET-pol        │
+  │ .tza              │ Direct   │ Streaming validate + extract         │
+  │ .tza-deep         │ Direct   │ Nested validate via TIBET-pol        │
   │ .tar.gz / .zip    │ Airlock  │ Quarantine → Mirror check → re-sign │
   │ .rar / .7z        │ Airlock  │ Quarantine → Mirror check → re-sign │
   │ Onbekend formaat  │ Weiger   │ Geen extractie, alert               │
@@ -485,10 +485,10 @@ D.2 Crate Verantwoordelijkheden
   - Streaming reader/writer traits
 
   tbz-cli:
-  - `tbz pack <pad> -o output.tbz` — archief aanmaken
-  - `tbz unpack <archief.tbz>` — streaming extractie via Airlock
-  - `tbz verify <archief.tbz>` — valideer zonder uitpakken
-  - `tbz inspect <archief.tbz>` — manifest en blok-info tonen
+  - `tbz pack <pad> -o output.tza` — archief aanmaken
+  - `tbz unpack <archief.tza>` — streaming extractie via Airlock
+  - `tbz verify <archief.tza>` — valideer zonder uitpakken
+  - `tbz inspect <archief.tza>` — manifest en blok-info tonen
   - `tbz mirror status` — Transparency Mirror sync status
   - `tbz init` — genereer .jis.json voor huidige repository
 

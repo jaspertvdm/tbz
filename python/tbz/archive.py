@@ -57,7 +57,7 @@ class TBZArchive:
     2. Pure Python mode: reads block headers directly (no external binary needed)
 
     Args:
-        path: Path to the .tbz archive file
+        path: Path to the .tza archive file
         tbz_binary: Path to the tbz CLI binary (auto-detected if not specified)
     """
 
@@ -217,14 +217,14 @@ class TBZArchive:
         return result.returncode == 0
 
     @staticmethod
-    def pack(source: str, output: str = "output.tbz", tbz_binary: str = None) -> "TBZArchive":
+    def pack(source: str, output: str = "output.tza", tbz_binary: str = None) -> "TBZArchive":
         """Pack files into a TBZ archive.
 
         Requires the Rust CLI binary.
 
         Args:
             source: Path to file or directory to archive
-            output: Output .tbz file path
+            output: Output .tza file path
             tbz_binary: Path to tbz CLI binary
 
         Returns:

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tbz"
-version = "0.1.2"
+version = "0.1.3"
 description = "TBZ (TIBET-zip) — Block-level authenticated compression for the Zero-Trust era"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
