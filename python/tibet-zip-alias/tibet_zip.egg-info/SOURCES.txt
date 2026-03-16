@@ -1,0 +1,7 @@
+README.md
+pyproject.toml
+tibet_zip.egg-info/PKG-INFO
+tibet_zip.egg-info/SOURCES.txt
+tibet_zip.egg-info/dependency_links.txt
+tibet_zip.egg-info/requires.txt
+tibet_zip.egg-info/top_level.txt

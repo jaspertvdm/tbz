@@ -1,0 +1,40 @@
+Metadata-Version: 2.4
+Name: tibet-zip
+Version: 0.1.4
+Summary: TIBET-zip — alias package for tbz (block-level authenticated compression)
+Author-email: Jasper van de Meent <jasper@humotica.nl>
+License-Expression: MIT OR Apache-2.0
+Project-URL: Homepage, https://github.com/jaspertvdm/tbz
+Project-URL: Repository, https://github.com/jaspertvdm/tbz
+Project-URL: Issues, https://github.com/jaspertvdm/tbz/issues
+Project-URL: Documentation, https://github.com/jaspertvdm/tbz/blob/main/ARCHITECTURE.md
+Keywords: compression,security,provenance,supply-chain,zero-trust,tibet,ed25519
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: Developers
+Classifier: Intended Audience :: System Administrators
+Classifier: Operating System :: OS Independent
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Rust
+Classifier: Topic :: Security
+Classifier: Topic :: Security :: Cryptography
+Classifier: Topic :: System :: Archiving :: Compression
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: tbz==0.1.4
+
+# tibet-zip
+
+This is an alias package for [**tbz**](https://pypi.org/project/tbz/) (TIBET-zip).
+
+```bash
+# Both work — same package:
+pip install tbz
+pip install tibet-zip
+```
+
+```python
+# Both work — same API:
+from tbz import TBZArchive, Mirror
+```
+
+See the [tbz documentation](https://github.com/jaspertvdm/tbz) for full usage.

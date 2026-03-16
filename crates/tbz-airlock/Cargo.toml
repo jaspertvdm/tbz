@@ -1,17 +1,17 @@
 [package]
-name = "tbz-airlock"
+name = "tibet-zip-airlock"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
 readme = "../../README.md"
-description = "TIBET Airlock: sandboxed decompression with eBPF kernel enforcement"
+description = "tibet-zip Airlock: sandboxed decompression with eBPF kernel enforcement"
 keywords = ["security", "sandbox", "decompression", "ebpf", "zero-trust"]
 categories = ["os", "cryptography"]
 
 [dependencies]
-tbz-core = { path = "../tbz-core", version = "0.1.4" }
+tbz-core = { package = "tibet-zip-core", path = "../tbz-core", version = "0.2.0" }
 zeroize.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
