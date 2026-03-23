@@ -219,10 +219,8 @@ fn main() -> anyhow::Result<()> {
     if let Some(path) = cli.path {
         let p = Path::new(&path);
         if (path.ends_with(".tza") || path.ends_with(".tbz")) && p.is_file() {
-            // .tza file → verify, then unpack
-            println!("Auto-detected: .tza archive → verify + unpack\n");
-            cmd_verify(&path, mirror_url)?;
-            println!();
+            // .tza file → verify, then unpack (cmd_unpack has its own airlock gate)
+            println!("Auto-detected: .tza archive → unpack (with airlock verification)\n");
             let out_dir = p.file_stem()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| "tbz_out".to_string());
@@ -439,13 +437,78 @@ fn cmd_inspect(archive: &str) -> anyhow::Result<()> {
 }
 
 /// Unpack a TBZ archive through the Airlock
+///
+/// AIRLOCK GATE: Runs full verification BEFORE extraction.
+/// Corrupt or tampered archives are BLOCKED.
 fn cmd_unpack(archive: &str, output_dir: &str) -> anyhow::Result<()> {
+    // =========================================================================
+    // AIRLOCK GATE — Verify BEFORE extraction. No exceptions.
+    // =========================================================================
+    println!("TBZ unpack: {} → {}\n", archive, output_dir);
+    println!("  Airlock pre-check: verifying archive integrity...\n");
+
+    {
+        let vfile = fs::File::open(archive)?;
+        let mut vreader = TbzReader::new(std::io::BufReader::new(vfile));
+        let mut errors = 0u32;
+        let mut block_count = 0u32;
+        let mut verifying_key: Option<tbz_core::VerifyingKey> = None;
+
+        while let Some(block) = vreader.read_block()? {
+            if let Err(_) = block.validate() {
+                errors += 1;
+                block_count += 1;
+                continue;
+            }
+
+            if block.header.block_type == BlockType::Manifest {
+                if let Ok(decompressed) = block.decompress() {
+                    if let Ok(manifest) = serde_json::from_slice::<Manifest>(&decompressed) {
+                        verifying_key = manifest.get_verifying_key();
+                    }
+                }
+            }
+
+            // Verify signature
+            if let Some(ref vk) = verifying_key {
+                if block.verify_signature(vk).is_err() {
+                    errors += 1;
+                }
+            }
+
+            // Verify content hash
+            match block.decompress() {
+                Ok(decompressed) => {
+                    let actual_hash = signature::sha256_hash(&decompressed);
+                    if actual_hash != block.envelope.erin.content_hash {
+                        errors += 1;
+                    }
+                }
+                Err(_) => { errors += 1; }
+            }
+
+            block_count += 1;
+        }
+
+        if errors > 0 {
+            anyhow::bail!(
+                "AIRLOCK BREACH BLOCKED — archive corrupt: {} ({} block errors in {} blocks). \
+                 Use `tbz verify` to inspect, or fix the archive.",
+                archive, errors, block_count
+            );
+        }
+
+        println!("  Airlock pre-check: {} blocks verified ✓\n", block_count);
+    }
+
+    // =========================================================================
+    // Extraction — only reached if all blocks verified
+    // =========================================================================
     let file = fs::File::open(archive)?;
     let mut reader = TbzReader::new(std::io::BufReader::new(file));
 
     // Create Airlock
     let mut airlock = tbz_airlock::Airlock::new(256 * 1024 * 1024, 30);
-    println!("TBZ unpack: {} → {}", archive, output_dir);
     println!("  Airlock mode: {:?}\n", airlock.mode());
 
     fs::create_dir_all(output_dir)?;

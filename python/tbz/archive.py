@@ -202,13 +202,43 @@ class TBZArchive:
             ],
         }
 
-    def unpack(self, output_dir: str = ".") -> bool:
+    def unpack(self, output_dir: str = ".", *, force: bool = False) -> bool:
         """Extract the archive through the TIBET Airlock.
 
+        AIRLOCK GATE: Verification is mandatory before extraction.
+        Corrupt or tampered archives are BLOCKED unless force=True.
+
         Requires the Rust CLI binary.
+
+        Args:
+            output_dir: Directory to extract into
+            force: If True, extract even if verification fails (DANGEROUS)
+
+        Returns:
+            True if extraction succeeded
+
+        Raises:
+            RuntimeError: If tbz binary not found or verification fails
         """
         if not self._tbz_bin:
             raise RuntimeError("tbz binary not found — install with: cargo install --path crates/tbz-cli")
+
+        # =====================================================================
+        # AIRLOCK GATE — Verify BEFORE extraction. No exceptions.
+        # =====================================================================
+        vresult = self.verify()
+        if not vresult.ok:
+            if not force:
+                raise RuntimeError(
+                    f"AIRLOCK BREACH BLOCKED — archive corrupt: {self.path} "
+                    f"({vresult.errors} block errors in {vresult.blocks_checked} blocks). "
+                    f"Use force=True to override (DANGEROUS, logged)."
+                )
+            import logging
+            logging.getLogger(__name__).critical(
+                "AIRLOCK OVERRIDE — extracting corrupt archive: %s (%d errors)",
+                self.path, vresult.errors,
+            )
 
         result = subprocess.run(
             [self._tbz_bin, "unpack", str(self.path), "-o", output_dir],

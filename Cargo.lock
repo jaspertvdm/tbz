@@ -1067,7 +1067,7 @@ dependencies = [
 
 [[package]]
 name = "tibet-zip-airlock"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bytes",
  "libc",
@@ -1080,7 +1080,7 @@ dependencies = [
 
 [[package]]
 name = "tibet-zip-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1099,7 +1099,7 @@ dependencies = [
 
 [[package]]
 name = "tibet-zip-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "byteorder",
  "bytes",
@@ -1115,7 +1115,7 @@ dependencies = [
 
 [[package]]
 name = "tibet-zip-jis"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ed25519-dalek",
  "glob",
@@ -1128,7 +1128,7 @@ dependencies = [
 
 [[package]]
 name = "tibet-zip-mirror"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
