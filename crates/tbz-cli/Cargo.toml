@@ -14,6 +14,10 @@ categories = ["command-line-utilities", "compression", "cryptography"]
 name = "tibet-zip"
 path = "src/main.rs"
 
+[[bin]]
+name = "tbz"
+path = "src/main.rs"
+
 [dependencies]
 tbz-core = { package = "tibet-zip-core", path = "../tbz-core", version = "0.2.0" }
 tbz-airlock = { package = "tibet-zip-airlock", path = "../tbz-airlock", version = "0.2.0" }
