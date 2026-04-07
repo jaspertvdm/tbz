@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tibet-zip"
-version = "0.1.4"
+version = "1.0.0"
 description = "TIBET-zip — alias package for tbz (block-level authenticated compression)"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
@@ -14,7 +14,7 @@ authors = [
 ]
 keywords = ["compression", "security", "provenance", "supply-chain", "zero-trust", "tibet", "ed25519"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Intended Audience :: System Administrators",
     "Operating System :: OS Independent",
@@ -25,7 +25,7 @@ classifiers = [
     "Topic :: System :: Archiving :: Compression",
 ]
 dependencies = [
-    "tbz==0.1.4",
+    "tbz==1.0.0",
 ]
 
 [project.urls]

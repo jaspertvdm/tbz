@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tbz"
-version = "0.1.6"
+version = "1.0.0"
 description = "TBZ (TIBET-zip) — Block-level authenticated compression for the Zero-Trust era"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
@@ -14,7 +14,7 @@ authors = [
 ]
 keywords = ["compression", "security", "provenance", "supply-chain", "zero-trust", "ed25519"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Intended Audience :: System Administrators",
     "Operating System :: OS Independent",
