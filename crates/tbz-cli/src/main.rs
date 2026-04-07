@@ -163,14 +163,14 @@ struct Cli {
     #[arg(global = false)]
     path: Option<String>,
 
+    /// Enable Transparency Mirror registration/lookups (opt-in)
+    #[arg(long, global = true, default_value_t = false)]
+    mirror: bool,
+
     /// Transparency Mirror base URL (also via TBZ_MIRROR_URL env)
     #[arg(long, global = true, env = "TBZ_MIRROR_URL",
           default_value = "https://brein.jaspervandemeent.nl")]
     mirror_url: String,
-
-    /// Disable Transparency Mirror lookups/registration
-    #[arg(long, global = true, default_value_t = false)]
-    no_mirror: bool,
 }
 
 #[derive(Subcommand)]
@@ -231,11 +231,11 @@ fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    // Resolve mirror URL once (None = disabled)
-    let mirror_url: Option<&str> = if cli.no_mirror {
-        None
-    } else {
+    // Resolve mirror URL once (None = disabled, only enabled with --mirror)
+    let mirror_url: Option<&str> = if cli.mirror {
         Some(&cli.mirror_url)
+    } else {
+        None
     };
 
     // If a subcommand was given, use it directly
