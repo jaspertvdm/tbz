@@ -1,0 +1,16 @@
+[workspace]
+
+[package]
+name = "tbz-core"
+version = "1.0.0"
+edition = "2021"
+authors = ["Jasper van de Meent <info@humotica.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jaspertvdm/tbz"
+readme = "../../README.md"
+description = "Alias for tibet-zip-core — Block-level authenticated compression with TIBET provenance"
+keywords = ["compression", "security", "provenance", "ed25519", "zero-trust"]
+categories = ["compression", "cryptography"]
+
+[dependencies]
+tibet-zip-core = "1.0.0"

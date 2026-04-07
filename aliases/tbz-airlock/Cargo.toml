@@ -1,0 +1,16 @@
+[workspace]
+
+[package]
+name = "tbz-airlock"
+version = "1.0.0"
+edition = "2021"
+authors = ["Jasper van de Meent <info@humotica.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jaspertvdm/tbz"
+readme = "../../README.md"
+description = "Alias for tibet-zip-airlock — Sandboxed decompression with eBPF kernel enforcement"
+keywords = ["security", "sandbox", "decompression", "ebpf", "zero-trust"]
+categories = ["os", "cryptography"]
+
+[dependencies]
+tibet-zip-airlock = "1.0.0"

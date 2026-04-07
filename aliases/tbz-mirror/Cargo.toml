@@ -1,0 +1,16 @@
+[workspace]
+
+[package]
+name = "tbz-mirror"
+version = "1.0.0"
+edition = "2021"
+authors = ["Jasper van de Meent <info@humotica.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jaspertvdm/tbz"
+readme = "../../README.md"
+description = "Alias for tibet-zip-mirror — Transparency Mirror for distributed trust"
+keywords = ["security", "transparency", "supply-chain", "provenance", "zero-trust"]
+categories = ["database", "cryptography"]
+
+[dependencies]
+tibet-zip-mirror = "1.0.0"
