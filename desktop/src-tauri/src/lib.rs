@@ -1,8 +1,7 @@
 mod bundle;
 mod manifest;
-mod tbz_block;
 
-use manifest::{BundleMeta, ExtractResult, Manifest, VerifyResult};
+use manifest::{BundleInfo, BundleMeta, ExtractResult, VerifyResult};
 use std::path::Path;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -15,7 +14,7 @@ async fn create_tza(
     source_path: String,
     output_path: String,
     sender: Option<String>,
-) -> Result<Manifest, String> {
+) -> Result<BundleInfo, String> {
     let src = Path::new(&source_path);
     let out = Path::new(&output_path);
     let meta = BundleMeta {
@@ -39,10 +38,10 @@ async fn extract_tza(tza_path: String, output_dir: String) -> Result<ExtractResu
 }
 
 #[tauri::command]
-async fn get_tza_info(tza_path: String) -> Result<Manifest, String> {
+async fn get_tza_info(tza_path: String) -> Result<BundleInfo, String> {
     let result = bundle::verify_bundle(Path::new(&tza_path))?;
     result
-        .manifest
+        .info
         .ok_or_else(|| "No manifest found".to_string())
 }
 
