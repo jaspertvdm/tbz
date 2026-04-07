@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TBZ</title>
+  <link rel="stylesheet" href="/src/styles.css">
+  <script type="module" src="/src/main.ts" defer></script>
+</head>
+<body>
+  <div id="app">
+    <header id="header">
+      <div class="logo">
+        <svg class="shield-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+          <path d="M9 12l2 2 4-4" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span>TBZ</span>
+      </div>
+      <div class="version">v1.0.0</div>
+    </header>
+
+    <div id="dropzone" class="dropzone">
+      <div class="drop-icon">
+        <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="8" y="8" width="32" height="32" rx="4"/>
+          <path d="M24 18v12M18 24h12" stroke-linecap="round"/>
+        </svg>
+      </div>
+      <p class="drop-text">Drop bestanden of map hier</p>
+      <p class="drop-hint">of klik om te kiezen</p>
+    </div>
+
+    <div id="cards" class="cards-list"></div>
+
+    <div id="actions" class="actions">
+      <button id="btn-pack" class="btn btn-primary">Pack .tza</button>
+      <button id="btn-clear" class="btn btn-ghost">Clear</button>
+    </div>
+
+    <footer id="footer">
+      <span class="footer-text">TIBET-ZIP protocol v1.0 &middot; SHA-256 verified</span>
+    </footer>
+  </div>
+</body>
+</html>

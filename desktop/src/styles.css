@@ -1,0 +1,448 @@
+/* TBZ — Tibet Bundle Zipper
+   Dark theme, Signal-inspired minimal UI */
+
+:root {
+  --bg:         #0f0f0f;
+  --surface:    #1a1a1a;
+  --surface-2:  #242424;
+  --border:     #2a2a2a;
+  --text:       #e4e4e4;
+  --text-muted: #888888;
+  --green:      #2ecc71;
+  --green-dim:  rgba(46, 204, 113, 0.12);
+  --red:        #e74c3c;
+  --red-dim:    rgba(231, 76, 60, 0.12);
+  --accent:     #6a5bff;
+  --accent-dim: #4a3fd4;
+  --radius:     12px;
+  --radius-sm:  8px;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Inter", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  padding: 16px;
+  gap: 12px;
+}
+
+/* ── Header ────────────────────────────────── */
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 0;
+  user-select: none;
+  -webkit-app-region: drag;
+}
+
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+.shield-icon {
+  width: 22px;
+  height: 22px;
+  color: var(--accent);
+}
+
+.version {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+/* ── Drop Zone ─────────────────────────────── */
+
+.dropzone {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 2px dashed var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+  min-height: 200px;
+}
+
+.dropzone:hover,
+.dropzone.drag-over {
+  border-color: var(--accent);
+  background: rgba(106, 91, 255, 0.04);
+}
+
+.dropzone.drag-over {
+  border-color: var(--accent);
+  background: rgba(106, 91, 255, 0.08);
+}
+
+.drop-icon svg {
+  width: 48px;
+  height: 48px;
+  color: var(--text-muted);
+  transition: color 0.2s;
+}
+
+.dropzone:hover .drop-icon svg,
+.dropzone.drag-over .drop-icon svg {
+  color: var(--accent);
+}
+
+.drop-text {
+  font-size: 14px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.drop-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  opacity: 0.6;
+}
+
+.dropzone.hidden {
+  display: none;
+}
+
+/* ── Cards List ────────────────────────────── */
+
+.cards-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cards-list:empty {
+  display: none;
+}
+
+/* Scrollbar */
+.cards-list::-webkit-scrollbar {
+  width: 6px;
+}
+.cards-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+.cards-list::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+.cards-list::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+/* ── File Card ─────────────────────────────── */
+
+.file-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  transition: border-color 0.2s, background 0.2s;
+  cursor: default;
+}
+
+.file-card:hover {
+  background: var(--surface-2);
+}
+
+.file-card.verified,
+.file-card.sealed {
+  border-color: var(--green);
+  background: var(--green-dim);
+}
+
+.file-card.corrupt {
+  border-color: var(--red);
+  background: var(--red-dim);
+}
+
+.file-card.extracted {
+  border-color: var(--text-muted);
+  opacity: 0.7;
+}
+
+/* Status icon */
+.card-status {
+  flex-shrink: 0;
+  width: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-top: 2px;
+}
+
+.status-svg {
+  width: 32px;
+  height: 32px;
+}
+
+.status-svg.ok {
+  color: var(--green);
+}
+
+.status-svg.fail {
+  color: var(--red);
+}
+
+.status-svg.neutral {
+  color: var(--text-muted);
+}
+
+/* Card content */
+.card-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.card-filename {
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 4px;
+}
+
+.card-meta {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.card-meta span {
+  display: block;
+}
+
+.card-status-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.card-status-line .status-svg {
+  width: 14px;
+  height: 14px;
+}
+
+.card-status-line.ok {
+  color: var(--green);
+}
+
+.card-status-line.fail {
+  color: var(--red);
+}
+
+.card-status-line.neutral {
+  color: var(--text-muted);
+}
+
+/* Card actions */
+.card-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.card-actions .btn {
+  font-size: 11px;
+  padding: 4px 10px;
+}
+
+/* ── Pending files (before pack) ───────────── */
+
+.pending-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.pending-card .file-icon {
+  color: var(--text-muted);
+  font-size: 16px;
+}
+
+.pending-card .file-name {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pending-card .file-size {
+  color: var(--text-muted);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.pending-card .remove-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  transition: color 0.15s, background 0.15s;
+}
+
+.pending-card .remove-btn:hover {
+  color: var(--red);
+  background: var(--red-dim);
+}
+
+/* ── Action Bar ────────────────────────────── */
+
+.actions {
+  display: none;
+  gap: 8px;
+  padding-top: 8px;
+}
+
+.actions.visible {
+  display: flex;
+}
+
+.btn {
+  padding: 10px 20px;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.1s;
+  user-select: none;
+}
+
+.btn:active {
+  transform: scale(0.97);
+}
+
+.btn-primary {
+  flex: 1;
+  background: var(--accent);
+  color: white;
+}
+
+.btn-primary:hover {
+  background: var(--accent-dim);
+}
+
+.btn-primary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-ghost {
+  background: var(--surface);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+
+.btn-ghost:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.btn-small {
+  padding: 5px 12px;
+  font-size: 12px;
+}
+
+/* ── Footer ────────────────────────────────── */
+
+footer {
+  text-align: center;
+  padding: 4px 0;
+}
+
+.footer-text {
+  font-size: 10px;
+  color: var(--text-muted);
+  opacity: 0.5;
+  letter-spacing: 0.3px;
+}
+
+/* ── Progress overlay ──────────────────────── */
+
+.progress-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.progress-box {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 32px 40px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.progress-text {
+  font-size: 14px;
+  color: var(--text-muted);
+}

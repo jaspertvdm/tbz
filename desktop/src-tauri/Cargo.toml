@@ -1,0 +1,26 @@
+[package]
+name = "tbz"
+version = "1.0.0"
+description = "Tibet Bundle Zipper — Secure file bundling with integrity verification"
+authors = ["HumoticaOS"]
+edition = "2021"
+
+[lib]
+name = "tbz_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+zip = "2"
+chrono = { version = "0.4", features = ["serde"] }
+walkdir = "2"
+hex = "0.4"
