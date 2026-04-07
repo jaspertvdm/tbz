@@ -1,6 +1,7 @@
 use crate::manifest::{
     compute_bundle_hash, BundleMeta, BundleStats, ExtractResult, Manifest, VerifyResult,
 };
+use crate::tbz_block;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
@@ -8,6 +9,24 @@ use std::io::{Read, Write};
 use std::path::Path;
 use walkdir::WalkDir;
 use zip::write::SimpleFileOptions;
+
+/// Detect archive format by reading the first 4 bytes
+/// Returns "tbz_block" for CLI format, "tibet_zip" for Desktop ZIP, or "unknown"
+fn detect_format(path: &Path) -> Result<&'static str, String> {
+    let mut file = fs::File::open(path).map_err(|e| format!("Cannot open: {}", e))?;
+    let mut magic = [0u8; 4];
+    let n = std::io::Read::read(&mut file, &mut magic).map_err(|e| format!("Read error: {}", e))?;
+    if n < 3 {
+        return Ok("unknown");
+    }
+    if magic[0..3] == [0x54, 0x42, 0x5A] {
+        Ok("tbz_block")
+    } else if magic == [0x50, 0x4B, 0x03, 0x04] {
+        Ok("tibet_zip")
+    } else {
+        Ok("unknown")
+    }
+}
 
 /// Create a .tza bundle from files/directories
 ///
@@ -111,9 +130,16 @@ pub fn create_bundle(
 
 /// Verify a .tza bundle — the airlock gate
 ///
-/// Reads MANIFEST.json, re-hashes every file, compares.
+/// Auto-detects format (TIBET-ZIP or TBZ block) and verifies accordingly.
 /// Returns VerifyResult with valid=true only if ALL files match.
 pub fn verify_bundle(tza_path: &Path) -> Result<VerifyResult, String> {
+    // Format detection: route to block-format handler if CLI archive
+    match detect_format(tza_path)? {
+        "tbz_block" => return tbz_block::verify_block_archive(tza_path),
+        "unknown" => return Err("Not a recognized TBZ archive format".to_string()),
+        _ => {} // "tibet_zip" — continue with ZIP handler below
+    }
+
     let file = fs::File::open(tza_path).map_err(|e| format!("Cannot open: {}", e))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("Not a valid ZIP: {}", e))?;
 
@@ -178,12 +204,17 @@ pub fn verify_bundle(tza_path: &Path) -> Result<VerifyResult, String> {
 
 /// Extract a .tza bundle — airlock-gated
 ///
-/// Always verifies first. Blocks extraction if tampered (unless force=true).
+/// Auto-detects format. Always verifies first. Blocks extraction if tampered (unless force=true).
 pub fn extract_bundle(
     tza_path: &Path,
     output_dir: &Path,
     force: bool,
 ) -> Result<ExtractResult, String> {
+    // Format detection: route to block-format handler if CLI archive
+    if detect_format(tza_path)? == "tbz_block" {
+        return tbz_block::extract_block_archive(tza_path, output_dir, force);
+    }
+
     // Step 1: Verify
     let verify_result = verify_bundle(tza_path)?;
 

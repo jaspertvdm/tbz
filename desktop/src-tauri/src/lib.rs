@@ -1,5 +1,6 @@
 mod bundle;
 mod manifest;
+mod tbz_block;
 
 use manifest::{BundleMeta, ExtractResult, Manifest, VerifyResult};
 use std::path::Path;

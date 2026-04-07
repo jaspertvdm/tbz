@@ -32,3 +32,5 @@ serde_json.workspace = true
 serde.workspace = true
 ureq.workspace = true
 sha2.workspace = true
+hex = "0.4"
+zip = "2"

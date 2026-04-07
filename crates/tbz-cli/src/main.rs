@@ -28,6 +28,40 @@ use tbz_core::manifest::{BlockEntry, Manifest};
 use tbz_core::stream::{TbzReader, TbzWriter};
 use tbz_core::{signature, BlockType};
 
+mod tibet_zip;
+
+// ---------------------------------------------------------------------------
+// Format detection: TBZ block-format vs TIBET-ZIP (Desktop ZIP+MANIFEST)
+// ---------------------------------------------------------------------------
+
+/// Archive format detected by magic bytes
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ArchiveFormat {
+    /// CLI block format: magic 0x54425A ("TBZ"), zstd+Ed25519
+    TbzBlock,
+    /// Desktop ZIP format: magic 0x504B0304 (PK), MANIFEST.json with SHA-256
+    TibetZip,
+    /// Unknown format
+    Unknown,
+}
+
+/// Detect archive format by reading the first 4 bytes
+fn detect_format(path: &str) -> anyhow::Result<ArchiveFormat> {
+    let mut file = fs::File::open(path)?;
+    let mut magic = [0u8; 4];
+    let n = std::io::Read::read(&mut file, &mut magic)?;
+    if n < 3 {
+        return Ok(ArchiveFormat::Unknown);
+    }
+    if magic[0..3] == [0x54, 0x42, 0x5A] {
+        Ok(ArchiveFormat::TbzBlock)
+    } else if magic == [0x50, 0x4B, 0x03, 0x04] {
+        Ok(ArchiveFormat::TibetZip)
+    } else {
+        Ok(ArchiveFormat::Unknown)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Transparency Mirror client (best-effort HTTP, never a hard error)
 // ---------------------------------------------------------------------------
@@ -377,6 +411,13 @@ fn cmd_pack(path: &str, output: &str, default_jis_level: u8, mirror_url: Option<
 
 /// Inspect a TBZ archive
 fn cmd_inspect(archive: &str) -> anyhow::Result<()> {
+    // Format detection: route to TIBET-ZIP handler if Desktop format
+    match detect_format(archive)? {
+        ArchiveFormat::TibetZip => return tibet_zip::inspect(archive),
+        ArchiveFormat::Unknown => anyhow::bail!("Not a TBZ archive: unrecognized format"),
+        ArchiveFormat::TbzBlock => {} // continue with block format below
+    }
+
     let file = fs::File::open(archive)?;
     let mut reader = TbzReader::new(std::io::BufReader::new(file));
 
@@ -441,6 +482,13 @@ fn cmd_inspect(archive: &str) -> anyhow::Result<()> {
 /// AIRLOCK GATE: Runs full verification BEFORE extraction.
 /// Corrupt or tampered archives are BLOCKED.
 fn cmd_unpack(archive: &str, output_dir: &str) -> anyhow::Result<()> {
+    // Format detection: route to TIBET-ZIP handler if Desktop format
+    match detect_format(archive)? {
+        ArchiveFormat::TibetZip => return tibet_zip::unpack(archive, output_dir),
+        ArchiveFormat::Unknown => anyhow::bail!("Not a TBZ archive: unrecognized format"),
+        ArchiveFormat::TbzBlock => {} // continue with block format below
+    }
+
     // =========================================================================
     // AIRLOCK GATE — Verify BEFORE extraction. No exceptions.
     // =========================================================================
@@ -570,6 +618,13 @@ fn cmd_unpack(archive: &str, output_dir: &str) -> anyhow::Result<()> {
 
 /// Verify a TBZ archive without extracting
 fn cmd_verify(archive: &str, mirror_url: Option<&str>) -> anyhow::Result<()> {
+    // Format detection: route to TIBET-ZIP handler if Desktop format
+    match detect_format(archive)? {
+        ArchiveFormat::TibetZip => return tibet_zip::verify(archive),
+        ArchiveFormat::Unknown => anyhow::bail!("Not a TBZ archive: unrecognized format"),
+        ArchiveFormat::TbzBlock => {} // continue with block format below
+    }
+
     let file = fs::File::open(archive)?;
     let mut reader = TbzReader::new(std::io::BufReader::new(file));
 
