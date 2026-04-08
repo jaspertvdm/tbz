@@ -231,7 +231,7 @@ fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    // Resolve mirror URL once (None = disabled, only enabled with --mirror)
+    // Resolve mirror URL once (None = disabled, opt-in only)
     let mirror_url: Option<&str> = if cli.mirror {
         Some(&cli.mirror_url)
     } else {
