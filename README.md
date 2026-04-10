@@ -11,6 +11,13 @@ Classic archive formats (`.zip`, `.tar.gz`) have no cryptographic binding betwee
 
 **TBZ** redesigns compression from Zero-Trust first principles. Every block carries its own [TIBET](ARCHITECTURE.md) provenance envelope and Ed25519 signature. Invalid blocks are rejected before decompression touches memory.
 
+**Why now:**
+
+In March 2026, researchers demonstrated that 50 of 51 antivirus engines failed to detect malware in manipulated ZIP archives — because the format has no cryptographic binding between headers and payload. The same month, supply chain attacks via compromised Python packages on PyPI hit 12,000+ downloads before detection. Both attacks exploit the same gap: archive formats that trust structure without proof.
+TBZ closes that gap. Not with a wrapper. Not with a sidecar signature. At the block level, inside the format itself.
+
+
+
 ## Install
 
 ```bash
@@ -27,6 +34,17 @@ pip install tbz              # Python (inspect + Mirror client)
 - **TIBET Airlock** — quarantine buffer with 0x00 wipe on failure. eBPF kernel-level enforcement when available, userspace fallback otherwise.
 - **Transparency Mirror** — distributed trust database for verifying package provenance across the supply chain.
 - **100% Pure Rust** — no C/C++ dependencies. Memory-safe, fast, portable.
+
+## Where it works
+
+Where TBZ applies
+
+- **Software supply chain** — every package you distribute is signed at the block level. No more "was this tarball tampered with between CI and PyPI?"
+- **AI model transport** — LLM weights, LoRA adapters, GGUF files. Models are the new executables. An unsigned model is an unsigned binary — you're running someone else's code on your inference stack without proof of origin.
+- **Agent-to-agent messaging** — on AInternet, every I-Poll message is TBZ-wrapped. No valid signature = message rejected before parsing. This is how you prevent prompt injection at the transport layer.
+- **Data at rest** — archives on disk carry their own provenance. No external signature file to lose, no GPG keyring to manage. The proof lives inside the file.
+- **Data in transit** — streaming fail-fast means a tampered block kills the connection mid-transfer. Malware never fully arrives.
+- **Regulatory compliance** — EU AI Act requires traceability for AI systems. TBZ gives you a per-block audit trail that proves what was shipped, by whom, and when.
 
 ## Quick Start
 
@@ -107,6 +125,15 @@ $ tbz verify tampered.tza
 │ Signature: Ed25519 (64 bytes) over all above    │
 └─────────────────────────────────────────────────┘
 ```
+## What TBZ replaces
+
+| Traditional workflow | TBZ equivalent |
+|---|---|
+| `tar czf` + `gpg --sign` + `sha256sum` | `tbz pack` |
+| `gpg --verify` + `sha256sum --check` + `tar xzf` | `tbz unpack` |
+| Separate .sig + .sha256 + .tar.gz files | Single .tza file |
+| Trust the archive, scan after extraction | Reject before decompression |
+| No per-file provenance | Per-block TIBET envelope |
 
 Block 0 is always the **Manifest** — the signed index of the archive containing the Ed25519 public key, block metadata, and total sizes (zip-bomb protection).
 
@@ -138,6 +165,8 @@ Public supply chain verification. The bootstrap node runs at `brein.jaspervandem
 - **Search**: `GET /api/tbz-mirror/search?verdict=safe`
 - **Stats**: `GET /api/tbz-mirror/stats`
 - **Analytics**: `GET /api/tbz-mirror/analytics`
+
+The Mirror serves the same purpose as Sigstore for containers, but for any file format. The difference: Sigstore signs the artifact externally. TBZ signs every block internally. The Mirror adds a public attestation layer on top — belt and suspenders.
 
 ## Workspace Structure
 
