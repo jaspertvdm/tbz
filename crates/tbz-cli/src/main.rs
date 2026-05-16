@@ -250,16 +250,70 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Smart auto-detection: tbz <path>
+    //
+    // v1.0.2: magic-bytes-FIRST. We read the first 4 bytes and check
+    // for the TBZ magic (0x54 0x42 0x5A 0x01 / TBZ\x01) BEFORE looking
+    // at the file extension. This prevents accidental double-wrap when
+    // a sealed envelope was renamed for human navigation
+    // (e.g. `vergadering-dinsdag.pdf`) — `tbz <file>` will now correctly
+    // route to unpack instead of re-packing the sealed bundle inside a
+    // new TBZ container.
+    //
+    // Bug reported by Jasper in cross-host vloedtest 12 mei 2026:
+    //   tbz superbelangrijk-doc-LEES-DIT-EERST.pdf
+    //   → Auto-detected: file → pack to ...tza    (= WRONG: re-wrapping a TBZ)
     if let Some(path) = cli.path {
         let p = Path::new(&path);
-        if (path.ends_with(".tza") || path.ends_with(".tbz")) && p.is_file() {
-            // .tza file → verify, then unpack (cmd_unpack has its own airlock gate)
-            println!("Auto-detected: .tza archive → unpack (with airlock verification)\n");
+
+        // Magic-bytes precheck (= content is truth, name is hint)
+        let is_tbz_by_magic = if p.is_file() {
+            match std::fs::File::open(p) {
+                Ok(mut f) => {
+                    use std::io::Read;
+                    let mut buf = [0u8; 4];
+                    matches!(f.read(&mut buf), Ok(n) if n == 4)
+                        && buf == [0x54, 0x42, 0x5A, 0x01]
+                }
+                Err(_) => false,
+            }
+        } else {
+            false
+        };
+
+        if is_tbz_by_magic {
+            // Sealed envelope identified by magic bytes — route to unpack
+            // regardless of extension. Plus warn the operator if the
+            // filename doesn't carry the typical .tza/.tbz suffix, so
+            // they know we detected a rename-recovered bundle.
+            let extension_matches =
+                path.ends_with(".tza") || path.ends_with(".tbz");
+            if !extension_matches {
+                println!(
+                    "✓ TBZ magic bytes detected — treating as sealed bundle"
+                );
+                println!(
+                    "  (filename does not carry .tza/.tbz suffix; this may be"
+                );
+                println!(
+                    "   an operator-renamed bundle. Content is truth, name is hint.)"
+                );
+            }
+            println!("Auto-detected: TBZ envelope → unpack (with airlock verification)\n");
             let out_dir = p.file_stem()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| "tbz_out".to_string());
             cmd_unpack(&path, &out_dir)?;
             return Ok(());
+        }
+
+        if (path.ends_with(".tza") || path.ends_with(".tbz")) && p.is_file() {
+            // Has TBZ-style extension but NO magic match. Could be a
+            // truncated/corrupt bundle, or a non-TBZ file with a
+            // misleading extension. Fail loudly.
+            anyhow::bail!(
+                "File '{}' has .tza/.tbz extension but does NOT carry the TBZ magic bytes. \n  Refusing to treat as a sealed archive. Use `tbz inspect {}` for details.",
+                path, path
+            );
         } else if p.is_dir() {
             // Directory → pack
             let dir_name = p.file_name()
