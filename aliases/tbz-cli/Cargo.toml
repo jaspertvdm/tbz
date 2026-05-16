@@ -2,7 +2,7 @@
 
 [package]
 name = "tbz-cli"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2021"
 authors = ["Jasper van de Meent <info@humotica.com>"]
 license = "MIT OR Apache-2.0"
@@ -21,10 +21,10 @@ name = "tbz"
 path = "src/main.rs"
 
 [dependencies]
-tbz-core = { package = "tibet-zip-core", version = "1.0.0" }
-tbz-airlock = { package = "tibet-zip-airlock", version = "1.0.0" }
-tbz-mirror = { package = "tibet-zip-mirror", version = "1.0.0" }
-tbz-jis = { package = "tibet-zip-jis", version = "1.0.0" }
+tbz-core = { package = "tibet-zip-core", version = "2.0.0" }
+tbz-airlock = { package = "tibet-zip-airlock", version = "2.0.0" }
+tbz-mirror = { package = "tibet-zip-mirror", version = "2.0.0" }
+tbz-jis = { package = "tibet-zip-jis", version = "2.0.0" }
 clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
