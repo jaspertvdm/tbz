@@ -9,7 +9,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "1.0.1"
+version = "2.0.0"
 edition = "2021"
 authors = ["Jasper van de Meent <info@humotica.com>"]
 license = "MIT OR Apache-2.0"
@@ -24,6 +24,9 @@ zstd = "0.13"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 sha2 = "0.10"
 rand = "0.8"
+# v2 confidential block encryption
+aes-gcm = "0.10"
+hkdf = "0.12"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

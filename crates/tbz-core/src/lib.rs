@@ -8,11 +8,17 @@ pub mod envelope;
 pub mod manifest;
 pub mod signature;
 pub mod stream;
+/// TBZ v2 wire-format: confidential block encryption + SSM routing header.
+/// See `python/tbz/SPEC-V2.md` for the canonical specification. This Rust
+/// implementation is byte-for-byte compatible with the Python reference
+/// (`tbz/v2.py`) and validated against `tibet-conformance-vectors v0.2.0`.
+pub mod v2;
 
 /// TBZ magic bytes: 0x54425A (ASCII "TBZ")
 pub const MAGIC: [u8; 3] = [0x54, 0x42, 0x5A];
 
-/// Current TBZ format version
+/// Current TBZ format version (v1 transparent / v2 confidential — selected
+/// per archive via the v2 header capability flags).
 pub const VERSION: u8 = 1;
 
 /// Block types
