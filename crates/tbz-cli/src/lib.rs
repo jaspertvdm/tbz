@@ -204,6 +204,11 @@ enum Commands {
         /// Sender's Ed25519 private key file (hex). Optional; ephemeral if absent.
         #[arg(long, value_name = "PRIVKEY_PATH")]
         from: Option<String>,
+        /// Declared payload class for v2 envelopes (= L2 semantic typing).
+        /// Values: identity | code | document | command | receipt.
+        /// Aliases: id / exec / doc / cmd / ack. Default: unspecified.
+        #[arg(long = "type", value_name = "CLASS")]
+        payload_type: Option<String>,
     },
 
     /// Extract a TBZ archive via the TIBET Airlock
@@ -220,6 +225,12 @@ enum Commands {
         /// Receiver's Ed25519 private key file (hex). Required for v2 sealed archives.
         #[arg(long = "as", value_name = "PRIVKEY_PATH")]
         as_key: Option<String>,
+        /// Skip the inner-manifest preview shown before extraction.
+        #[arg(long)]
+        no_preview: bool,
+        /// Make payload-class / extension mismatches fatal (default = warn only).
+        #[arg(long)]
+        strict_type: bool,
     },
 
     /// Validate a TBZ archive without extracting
@@ -274,17 +285,32 @@ pub fn run() -> anyhow::Result<()> {
     // If a subcommand was given, use it directly
     if let Some(command) = cli.command {
         return match command {
-            Commands::Pack { path, output, jis_level, seal, to, from } => {
+            Commands::Pack { path, output, jis_level, seal, to, from, payload_type } => {
                 if seal {
                     let to_hex = to.ok_or_else(|| anyhow::anyhow!(
                         "--seal requires --to <pubkey-hex> (64 hex chars)"))?;
-                    cmd_pack_sealed(&path, &output, jis_level, mirror_url, &to_hex, from.as_deref())
+                    let class = match payload_type.as_deref() {
+                        Some(s) => v2::PayloadClass::from_label(s).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "--type '{}' unknown — use one of: identity, code, document, command, receipt",
+                                s
+                            )
+                        })?,
+                        None => v2::PayloadClass::Unspecified,
+                    };
+                    cmd_pack_sealed(
+                        &path, &output, jis_level, mirror_url,
+                        &to_hex, from.as_deref(), class,
+                    )
                 } else {
+                    if payload_type.is_some() {
+                        anyhow::bail!("--type only applies to sealed v2 archives (combine with --seal)");
+                    }
                     cmd_pack(&path, &output, jis_level, mirror_url)
                 }
             }
-            Commands::Unpack { archive, output, as_key } => {
-                cmd_unpack_dispatch(&archive, &output, as_key.as_deref())
+            Commands::Unpack { archive, output, as_key, no_preview, strict_type } => {
+                cmd_unpack_dispatch(&archive, &output, as_key.as_deref(), !no_preview, strict_type)
             }
             Commands::Verify { archive } => cmd_verify(&archive, mirror_url),
             Commands::Inspect { archive } => cmd_inspect(&archive),
@@ -1081,6 +1107,7 @@ fn cmd_pack_sealed(
     mirror_url: Option<&str>,
     receiver_hex: &str,
     sender_priv_path: Option<&str>,
+    payload_class: v2::PayloadClass,
 ) -> anyhow::Result<()> {
     let source = Path::new(path);
     if !source.exists() {
@@ -1101,14 +1128,20 @@ fn cmd_pack_sealed(
     println!("TBZ pack (sealed v2): {} → {}", path, output);
     println!("  Sender pubkey:   {}", hex_encode(&sender_key.verifying_key().to_bytes()));
     println!("  Receiver pubkey: {}", receiver_hex);
+    println!("  Payload class:   {}", payload_class.label());
 
     // Build the v1 archive in memory (Vec<u8> buffer)
     let v1_bytes = build_v1_archive_bytes(source, default_jis_level, mirror_url)?;
     println!("\n  Inner v1 archive: {} bytes", v1_bytes.len());
 
-    // Wrap in v2 sealed container
-    let container = v2::write_sealed_container(&sender_key, &receiver_pubkey, &v1_bytes)
-        .map_err(|e| anyhow::anyhow!("v2 seal failed: {}", e))?;
+    // Wrap in v2 sealed container with declared class
+    let container = v2::write_sealed_container_with_class(
+        &sender_key,
+        &receiver_pubkey,
+        &v1_bytes,
+        payload_class,
+    )
+    .map_err(|e| anyhow::anyhow!("v2 seal failed: {}", e))?;
 
     fs::write(output, &container)?;
     println!("  Outer v2 envelope: {} bytes (overhead: {} bytes)", container.len(), container.len() - v1_bytes.len());
@@ -1178,7 +1211,17 @@ fn build_v1_archive_bytes(
 }
 
 /// Dispatch unpack: detect v1 vs v2 and route accordingly.
-fn cmd_unpack_dispatch(archive: &str, output_dir: &str, as_key: Option<&str>) -> anyhow::Result<()> {
+///
+/// `preview` (= default true) shows the inner manifest before extraction.
+/// `strict_type` (= default false) escalates payload-class/extension
+/// mismatches from warnings to errors.
+fn cmd_unpack_dispatch(
+    archive: &str,
+    output_dir: &str,
+    as_key: Option<&str>,
+    preview: bool,
+    strict_type: bool,
+) -> anyhow::Result<()> {
     // Peek first 32 bytes to detect version
     let mut head = [0u8; 32];
     let n = {
@@ -1193,19 +1236,241 @@ fn cmd_unpack_dispatch(archive: &str, output_dir: &str, as_key: Option<&str>) ->
         let receiver_key = read_signing_key_from_file(priv_path)?;
         println!("TBZ unpack (v2 sealed): {} → {}", archive, output_dir);
         let container = fs::read(archive)?;
-        let (env, plain) = v2::read_sealed_container(&container, &receiver_key)
-            .map_err(|e| anyhow::anyhow!("v2 unseal failed: {}", e))?;
+        let result = v2::read_sealed_container_full(&container, &receiver_key);
+        let (env, plain, payload_class) = match result {
+            Ok(t) => t,
+            Err(e) => {
+                // Audit the failure before bubbling up
+                // Extract whatever metadata we can (sender/receiver/uuid in plain header)
+                let (sender_hex, receiver_hex, uuid_hex) = peek_v2_envelope_metadata(&container);
+                emit_unseal_audit(
+                    &sender_hex,
+                    &receiver_hex,
+                    &uuid_hex,
+                    "unknown",
+                    0,
+                    &format!("error:{:?}", e).replace('"', "'"),
+                );
+                return Err(anyhow::anyhow!("v2 unseal failed: {}", e));
+            }
+        };
         println!("  Sender:   {}", hex_encode(&env.sender_pubkey));
         println!("  Receiver: {} ✓", hex_encode(&env.receiver_pubkey));
+        println!("  Declared payload class: {}", payload_class.label());
         println!("  Inner v1 archive: {} bytes\n", plain.len());
+
+        // Check outer filename extension against declared class
+        match check_class_vs_extension(archive, payload_class) {
+            ClassCheck::Ok => {}
+            ClassCheck::Warn(msg) | ClassCheck::Mismatch(msg) => {
+                if strict_type {
+                    anyhow::bail!("payload-class/extension mismatch (strict mode): {}", msg);
+                } else {
+                    println!("  ⚠ payload-class hint: {}", msg);
+                    println!("    (use --strict-type to make this fatal)\n");
+                }
+            }
+        }
+
+        // Inner manifest preview (= shown before disk extraction)
+        if preview {
+            preview_inner_manifest(&plain, payload_class, strict_type)?;
+        }
 
         // Write to temp file, then call cmd_unpack with that file
         let tmp = std::env::temp_dir().join(format!("tbz-v2-inner-{}.tza", std::process::id()));
         fs::write(&tmp, &plain)?;
         let result = cmd_unpack(tmp.to_str().unwrap(), output_dir);
         let _ = fs::remove_file(&tmp);
+
+        // Emit unseal audit record (= soft-fail, never blocks)
+        let outcome = if result.is_ok() { "success" } else { "extract-failed" };
+        emit_unseal_audit(
+            &hex_encode(&env.sender_pubkey),
+            &hex_encode(&env.receiver_pubkey),
+            &hex_encode(&env.archive_uuid),
+            payload_class.label(),
+            plain.len(),
+            outcome,
+        );
+
         result
     } else {
         cmd_unpack(archive, output_dir)
     }
+}
+
+/// Best-effort metadata peek without decryption (for audit on failure paths).
+fn peek_v2_envelope_metadata(container: &[u8]) -> (String, String, String) {
+    let min = 3 + 4 + 32 + 32 + 16;
+    if container.len() < min { return (String::new(), String::new(), String::new()); }
+    let mut off = 3 + 4;
+    let sender = &container[off..off + 32]; off += 32;
+    let receiver = &container[off..off + 32]; off += 32;
+    let uuid = &container[off..off + 16];
+    (hex_encode(sender), hex_encode(receiver), hex_encode(uuid))
+}
+
+/// Result of checking outer filename extension against declared payload class.
+enum ClassCheck {
+    Ok,
+    Warn(String),
+    Mismatch(String),
+}
+
+fn check_class_vs_extension(archive: &str, class: v2::PayloadClass) -> ClassCheck {
+    // Take the LAST extension component
+    let ext = Path::new(archive)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase());
+
+    use v2::PayloadClass::*;
+    let hint = match (class, ext.as_deref()) {
+        (Unspecified, _) => return ClassCheck::Ok,
+        (Identity, Some("aint")) | (Identity, Some("id")) | (Identity, Some("tza")) => return ClassCheck::Ok,
+        (Code, Some("tza")) | (Code, Some("bin")) | (Code, Some("exec")) => return ClassCheck::Ok,
+        (Document, Some("tza")) | (Document, Some("doc")) | (Document, Some("pdf"))
+            | (Document, Some("txt")) | (Document, Some("md")) => return ClassCheck::Ok,
+        (Command, Some("tza")) | (Command, Some("cmd")) | (Command, Some("req")) => return ClassCheck::Ok,
+        (Receipt, Some("tza")) | (Receipt, Some("ack")) | (Receipt, Some("rcpt")) => return ClassCheck::Ok,
+
+        (Identity, Some(e)) => format!("outer .{} but declared class = identity", e),
+        (Code,     Some(e)) => format!("outer .{} but declared class = code", e),
+        (Document, Some(e)) => format!("outer .{} but declared class = document", e),
+        (Command,  Some(e)) => format!("outer .{} but declared class = command", e),
+        (Receipt,  Some(e)) => format!("outer .{} but declared class = receipt", e),
+        (_, None) => format!("no extension on outer file but declared class = {}", class.label()),
+    };
+
+    ClassCheck::Mismatch(hint)
+}
+
+/// Emit a tbz-unseal.v1 audit record to the audit JSONL file.
+///
+/// Soft-fail: if the audit destination is not writable we silently skip
+/// — auditability is opt-in and never blocks a legitimate unseal.
+///
+/// Destination, in order of preference:
+/// 1. `$TBZ_UNSEAL_AUDIT_LOG` (= explicit override)
+/// 2. `/var/log/tibet/tbz-unseal.jsonl` (= system mode)
+/// 3. `$XDG_STATE_HOME/tbz/audit.jsonl` or `$HOME/.local/state/tbz/audit.jsonl`
+fn emit_unseal_audit(
+    sender_pubkey_hex: &str,
+    receiver_pubkey_hex: &str,
+    archive_uuid_hex: &str,
+    payload_class: &str,
+    payload_size: usize,
+    outcome: &str,
+) {
+    use std::io::Write as _;
+    let timestamp = chrono_now();
+    let event_id = format!("tbz-unseal-{}-{}", std::process::id(), timestamp);
+    let record = format!(
+        "{{\"event\":\"tbz-unseal.v1\",\"event_id\":\"{}\",\"timestamp\":\"{}\",\"sender_pubkey\":\"{}\",\"receiver_pubkey\":\"{}\",\"archive_uuid\":\"{}\",\"payload_class\":\"{}\",\"payload_size\":{},\"outcome\":\"{}\",\"_emitter\":\"tibet-zip-cli@{}\"}}\n",
+        event_id,
+        timestamp,
+        sender_pubkey_hex,
+        receiver_pubkey_hex,
+        archive_uuid_hex,
+        payload_class,
+        payload_size,
+        outcome,
+        env!("CARGO_PKG_VERSION"),
+    );
+
+    let candidates: Vec<std::path::PathBuf> = {
+        let mut v = Vec::new();
+        if let Ok(p) = std::env::var("TBZ_UNSEAL_AUDIT_LOG") {
+            v.push(std::path::PathBuf::from(p));
+        }
+        v.push(std::path::PathBuf::from("/var/log/tibet/tbz-unseal.jsonl"));
+        let xdg = std::env::var("XDG_STATE_HOME")
+            .ok()
+            .or_else(|| {
+                std::env::var("HOME")
+                    .ok()
+                    .map(|h| format!("{}/.local/state", h))
+            });
+        if let Some(base) = xdg {
+            v.push(std::path::PathBuf::from(format!("{}/tbz/audit.jsonl", base)));
+        }
+        v
+    };
+
+    for path in candidates {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+            if f.write_all(record.as_bytes()).is_ok() {
+                return; // success — first writable destination wins
+            }
+        }
+    }
+    // All destinations failed → silent skip (soft-fail)
+}
+
+/// Decode the inner v1 archive enough to show what's inside BEFORE extraction.
+/// Optionally warn on executable file types when payload_class != code.
+fn preview_inner_manifest(
+    inner: &[u8],
+    class: v2::PayloadClass,
+    strict_type: bool,
+) -> anyhow::Result<()> {
+    use tbz_core::stream::TbzReader;
+    let mut reader = TbzReader::new(std::io::Cursor::new(inner));
+    let mut shown = 0u32;
+    let mut warn_files: Vec<String> = Vec::new();
+
+    println!("  Preview (= no disk write yet):");
+    while let Some(block) = reader.read_block()? {
+        if block.header.block_type == BlockType::Manifest {
+            if let Ok(json) = block.decompress() {
+                if let Ok(manifest) = serde_json::from_slice::<Manifest>(&json) {
+                    for entry in &manifest.blocks {
+                        let path = entry.path.as_deref().unwrap_or(&entry.description);
+                        println!(
+                            "    [{:>3}] {:<40} {:>10} bytes  JIS {}",
+                            entry.index, path, entry.uncompressed_size, entry.jis_level
+                        );
+                        shown += 1;
+                        // Warn on executable file types when class != code
+                        if class != v2::PayloadClass::Code {
+                            let lower = path.to_ascii_lowercase();
+                            let exec = lower.ends_with(".exe")
+                                || lower.ends_with(".bat")
+                                || lower.ends_with(".cmd")
+                                || lower.ends_with(".sh")
+                                || lower.ends_with(".ps1")
+                                || lower.ends_with(".vbs");
+                            if exec {
+                                warn_files.push(path.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            break; // manifest is block 0, we're done previewing
+        }
+    }
+    if shown == 0 {
+        println!("    (no manifest entries found)");
+    }
+    if !warn_files.is_empty() {
+        let msg = format!(
+            "executable file(s) found inside a non-code envelope: {}",
+            warn_files.join(", ")
+        );
+        if strict_type {
+            anyhow::bail!("strict-type: {}", msg);
+        } else {
+            println!("\n  ⚠ {}", msg);
+            println!("    (declared class = {} — pass --strict-type to refuse)\n",
+                class.label());
+        }
+    } else {
+        println!();
+    }
+    Ok(())
 }

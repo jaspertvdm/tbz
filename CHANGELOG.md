@@ -2,6 +2,56 @@
 
 All notable changes to TBZ (TIBET-zip) are documented here.
 
+## [2.2.0] — 2026-05-17
+
+### Added — L2 semantic typing + audit trail (iddrop foundation)
+
+This release lays the groundwork for the iddrop protocol layer
+(request-driven identity transfer, MITM-resistant). Three quick wins
+in TBZ v2 that make the surface-attack story honest:
+
+- **`PayloadClass` byte in V2 header** — the reserved byte
+  (always `0x00` in v2.1) now declares one of: `identity`, `code`,
+  `document`, `command`, `receipt`. v2.1 archives decode as
+  `Unspecified` (byte was 0) — fully backwards compatible.
+- **`tibet-zip pack --type <class>`** — declare the payload class
+  on the wire. Aliases: `id` / `exec` / `doc` / `cmd` / `ack`.
+- **Inner-manifest preview on unpack** — always shown before any
+  bytes touch disk; use `--no-preview` to suppress.
+- **Payload-class / extension mismatch warning** — e.g. an envelope
+  declared `identity` written to `logboek.txt` triggers a hint.
+  Use `--strict-type` to make mismatches and inner-executable
+  warnings (`.bat` / `.exe` / `.sh` inside a `document` envelope)
+  fatal.
+- **`tbz-unseal.v1` audit JSONL** — every v2 unseal (success or
+  failure) emits a record with sender / receiver / archive_uuid /
+  payload_class / outcome. Destination: `$TBZ_UNSEAL_AUDIT_LOG`
+  override, then `/var/log/tibet/tbz-unseal.jsonl`, then
+  `$XDG_STATE_HOME/tbz/audit.jsonl`. Soft-fail — never blocks a
+  legitimate unseal.
+
+### New library API
+
+- `v2::PayloadClass` enum + `from_label` / `as_byte` / `label`.
+- `v2::encode_v2_header_with_class` + `v2::decode_v2_header_full`.
+- `v2::write_sealed_container_with_class`.
+- `v2::read_sealed_container_full` (returns `(env, plain, class)`).
+
+### Tests
+
+- 31 unit tests in `tbz-core` (= 6 new: 3 payload-class roundtrip
+  + backward-compat with v2.1 archives + label parse).
+- 5 integration tests in `tbz-cli` (unchanged from 2.1.1).
+
+### Frame
+
+Why this release: Jasper's iddrop-spec ([[project-iddrop-protocol-spec]])
+identifies that sealed transport bypassed wire-level AV by design —
+that is the *point* of confidentiality. v2.2 adds the user-facing
+hint surface that lets receivers refuse the wrong *kind* of payload,
+audit every unseal, and refuse extraction of executables inside a
+non-code envelope. iddrop (L3) builds on top of this.
+
 ## [2.1.1] — 2026-05-17
 
 ### Fixed

@@ -11,7 +11,7 @@ keywords = ["security", "sandbox", "decompression", "ebpf", "zero-trust"]
 categories = ["os", "cryptography"]
 
 [dependencies]
-tbz-core = { package = "tibet-zip-core", path = "../tbz-core", version = "2.1.1" }
+tbz-core = { package = "tibet-zip-core", path = "../tbz-core", version = "2.2.0" }
 zeroize.workspace = true
 tokio.workspace = true
 thiserror.workspace = true

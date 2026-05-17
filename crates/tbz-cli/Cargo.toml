@@ -23,10 +23,10 @@ name = "tbz"
 path = "src/main.rs"
 
 [dependencies]
-tbz-core = { package = "tibet-zip-core", path = "../tbz-core", version = "2.1.1" }
-tbz-airlock = { package = "tibet-zip-airlock", path = "../tbz-airlock", version = "2.1.1" }
-tbz-mirror = { package = "tibet-zip-mirror", path = "../tbz-mirror", version = "2.1.1" }
-tbz-jis = { package = "tibet-zip-jis", path = "../tbz-jis", version = "2.1.1" }
+tbz-core = { package = "tibet-zip-core", path = "../tbz-core", version = "2.2.0" }
+tbz-airlock = { package = "tibet-zip-airlock", path = "../tbz-airlock", version = "2.2.0" }
+tbz-mirror = { package = "tibet-zip-mirror", path = "../tbz-mirror", version = "2.2.0" }
+tbz-jis = { package = "tibet-zip-jis", path = "../tbz-jis", version = "2.2.0" }
 clap.workspace = true
 tokio.workspace = true
 anyhow.workspace = true

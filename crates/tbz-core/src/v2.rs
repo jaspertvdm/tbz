@@ -45,6 +45,69 @@ pub const FLAG_HAS_ENCRYPTED_BLOCKS: u8 = 0x02;
 pub const FLAG_HAS_RECEIVER_IDENTITY: u8 = 0x04;
 pub const FLAG_HAS_BLOCK_COMPRESSION: u8 = 0x08;
 
+/// Declared payload class (byte 3 of v2 header, was reserved in v2.1).
+///
+/// First-class semantic typing of what kind of payload an envelope carries,
+/// so unpack tooling can warn on extension/class mismatches and so the
+/// iddrop protocol layer can refuse to materialise the wrong kind of claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PayloadClass {
+    /// Unspecified / legacy v2.1 archives (byte was always 0).
+    Unspecified = 0,
+    /// Identity claim — birth bundle, AINS credential, JIS-DID assertion.
+    Identity = 1,
+    /// Executable code — script, binary, agent capsule.
+    Code = 2,
+    /// Human-readable document — text, markdown, PDF.
+    Document = 3,
+    /// Command / request — orchestration intent for the receiver.
+    Command = 4,
+    /// Receipt / acknowledgement — proof of prior action.
+    Receipt = 5,
+}
+
+impl PayloadClass {
+    pub fn from_byte(b: u8) -> Self {
+        match b {
+            1 => PayloadClass::Identity,
+            2 => PayloadClass::Code,
+            3 => PayloadClass::Document,
+            4 => PayloadClass::Command,
+            5 => PayloadClass::Receipt,
+            _ => PayloadClass::Unspecified,
+        }
+    }
+
+    pub fn as_byte(self) -> u8 {
+        self as u8
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PayloadClass::Unspecified => "unspecified",
+            PayloadClass::Identity => "identity",
+            PayloadClass::Code => "code",
+            PayloadClass::Document => "document",
+            PayloadClass::Command => "command",
+            PayloadClass::Receipt => "receipt",
+        }
+    }
+
+    /// Parse a CLI-friendly name.
+    pub fn from_label(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "unspecified" | "unspec" | "none" => Some(PayloadClass::Unspecified),
+            "identity" | "id" => Some(PayloadClass::Identity),
+            "code" | "exec" | "binary" => Some(PayloadClass::Code),
+            "document" | "doc" => Some(PayloadClass::Document),
+            "command" | "cmd" | "request" => Some(PayloadClass::Command),
+            "receipt" | "ack" => Some(PayloadClass::Receipt),
+            _ => None,
+        }
+    }
+}
+
 /// Errors specific to the v2 wire format.
 #[derive(Error, Debug)]
 pub enum Tbzv2Error {
@@ -71,7 +134,20 @@ pub type Result<T> = std::result::Result<T, Tbzv2Error>;
 ///
 /// Returns: `[SSM (1B, optional)] [v2_hdr (4B)]`.
 /// If `ssm_byte` is `Some`, `FLAG_HAS_SSM_HEADER` is auto-set.
+///
+/// Byte 3 of the v2 header carries the declared `PayloadClass`. In v2.1
+/// archives this byte was always 0 (`Unspecified`), which the v2.2 decoder
+/// reads back identically, so existing v2.1 envelopes remain readable.
 pub fn encode_v2_header(flags: u8, ssm_byte: Option<u8>) -> Vec<u8> {
+    encode_v2_header_with_class(flags, ssm_byte, PayloadClass::Unspecified)
+}
+
+/// Encode v2 header with an explicit payload class declaration.
+pub fn encode_v2_header_with_class(
+    flags: u8,
+    ssm_byte: Option<u8>,
+    payload_class: PayloadClass,
+) -> Vec<u8> {
     let final_flags = if ssm_byte.is_some() {
         flags | FLAG_HAS_SSM_HEADER
     } else {
@@ -81,14 +157,28 @@ pub fn encode_v2_header(flags: u8, ssm_byte: Option<u8>) -> Vec<u8> {
     if let Some(b) = ssm_byte {
         out.push(b);
     }
-    out.extend_from_slice(&[V2_VERSION_MAJOR, V2_VERSION_MINOR, final_flags, 0x00]);
+    out.extend_from_slice(&[
+        V2_VERSION_MAJOR,
+        V2_VERSION_MINOR,
+        final_flags,
+        payload_class.as_byte(),
+    ]);
     out
 }
 
 /// Decode the v2 wire-format prefix immediately following MAGIC.
 ///
 /// Returns `(version_major, flags, ssm_byte_or_None)`.
+///
+/// Kept for backward compatibility; use [`decode_v2_header_full`] to also
+/// retrieve the declared `PayloadClass`.
 pub fn decode_v2_header(data: &[u8]) -> Result<(u8, u8, Option<u8>)> {
+    let (v, f, s, _c) = decode_v2_header_full(data)?;
+    Ok((v, f, s))
+}
+
+/// Decode v2 header including the declared payload class.
+pub fn decode_v2_header_full(data: &[u8]) -> Result<(u8, u8, Option<u8>, PayloadClass)> {
     if data.len() < V2_HEADER_LEN {
         return Err(Tbzv2Error::TooShort);
     }
@@ -99,7 +189,8 @@ pub fn decode_v2_header(data: &[u8]) -> Result<(u8, u8, Option<u8>)> {
         if flags & FLAG_HAS_SSM_HEADER != 0 {
             return Err(Tbzv2Error::SsmFlagMismatchA);
         }
-        return Ok((V2_VERSION_MAJOR, flags, None));
+        let class = PayloadClass::from_byte(data[3]);
+        return Ok((V2_VERSION_MAJOR, flags, None, class));
     }
 
     // Layout B: [ssm(1)][v2_hdr(4)].
@@ -112,7 +203,8 @@ pub fn decode_v2_header(data: &[u8]) -> Result<(u8, u8, Option<u8>)> {
         if flags & FLAG_HAS_SSM_HEADER == 0 {
             return Err(Tbzv2Error::SsmFlagMismatchB);
         }
-        return Ok((V2_VERSION_MAJOR, flags, Some(ssm)));
+        let class = PayloadClass::from_byte(data[4]);
+        return Ok((V2_VERSION_MAJOR, flags, Some(ssm), class));
     }
 
     Err(Tbzv2Error::VersionMismatch)
@@ -300,10 +392,32 @@ pub enum V2ContainerError {
 /// `payload` is typically a v1 archive's bytes; the v2 layer adds AES-256-GCM
 /// confidentiality for the named receiver and an Ed25519 signature from the
 /// sender over the ciphertext.
+///
+/// Uses `PayloadClass::Unspecified`; for v2.2 callers that want to declare
+/// a payload class, use [`write_sealed_container_with_class`].
 pub fn write_sealed_container(
     sender_signing_key: &ed25519_dalek::SigningKey,
     receiver_pubkey: &[u8; 32],
     payload: &[u8],
+) -> std::result::Result<Vec<u8>, V2ContainerError> {
+    write_sealed_container_with_class(
+        sender_signing_key,
+        receiver_pubkey,
+        payload,
+        PayloadClass::Unspecified,
+    )
+}
+
+/// Build a v2 sealed container with an explicit declared payload class.
+///
+/// The declared class is carried in byte 3 of the V2 header. Unpack tooling
+/// can warn on extension/class mismatches and the iddrop layer can refuse
+/// to materialise the wrong kind of claim.
+pub fn write_sealed_container_with_class(
+    sender_signing_key: &ed25519_dalek::SigningKey,
+    receiver_pubkey: &[u8; 32],
+    payload: &[u8],
+    payload_class: PayloadClass,
 ) -> std::result::Result<Vec<u8>, V2ContainerError> {
     use ed25519_dalek::Signer;
 
@@ -332,12 +446,13 @@ pub fn write_sealed_container(
     let signature = sender_signing_key.sign(&ciphertext);
     let sig_bytes: [u8; 64] = signature.to_bytes();
 
-    // Assemble: MAGIC + V2_HDR + sender_pk + receiver_pk + uuid + len + cipher + sig
+    // Assemble: MAGIC + V2_HDR (with payload_class) + sender_pk + receiver_pk
+    //         + uuid + len + cipher + sig
     let mut out: Vec<u8> = Vec::with_capacity(
         V2_CONTAINER_PREFIX_LEN + ciphertext.len() + V2_CONTAINER_SIG_LEN,
     );
     out.extend_from_slice(&crate::MAGIC);
-    out.extend_from_slice(&encode_v2_header(envelope.flags, None));
+    out.extend_from_slice(&encode_v2_header_with_class(envelope.flags, None, payload_class));
     out.extend_from_slice(&sender_pubkey);
     out.extend_from_slice(receiver_pubkey);
     out.extend_from_slice(&archive_uuid);
@@ -351,10 +466,23 @@ pub fn write_sealed_container(
 ///
 /// Verifies the sender signature first; on failure returns `BadSignature`
 /// without attempting decryption.
+///
+/// Use [`read_sealed_container_full`] to also retrieve the declared
+/// `PayloadClass`.
 pub fn read_sealed_container(
     container: &[u8],
     receiver_signing_key: &ed25519_dalek::SigningKey,
 ) -> std::result::Result<(SealedEnvelope, Vec<u8>), V2ContainerError> {
+    let (env, plain, _class) = read_sealed_container_full(container, receiver_signing_key)?;
+    Ok((env, plain))
+}
+
+/// Parse and decrypt a v2 sealed container, returning the declared
+/// payload class as well as the inner payload.
+pub fn read_sealed_container_full(
+    container: &[u8],
+    receiver_signing_key: &ed25519_dalek::SigningKey,
+) -> std::result::Result<(SealedEnvelope, Vec<u8>, PayloadClass), V2ContainerError> {
     use ed25519_dalek::{Verifier, VerifyingKey};
 
     if container.len() < V2_CONTAINER_PREFIX_LEN + V2_CONTAINER_SIG_LEN {
@@ -364,9 +492,10 @@ pub fn read_sealed_container(
         return Err(V2ContainerError::BadMagic);
     }
 
-    // V2 header
+    // V2 header (including declared payload class in byte 3)
     let v2_hdr = &container[3..3 + V2_HEADER_LEN];
-    let (version, flags, _ssm) = decode_v2_header(v2_hdr).map_err(V2ContainerError::Envelope)?;
+    let (version, flags, _ssm, payload_class) =
+        decode_v2_header_full(v2_hdr).map_err(V2ContainerError::Envelope)?;
     if version != V2_VERSION_MAJOR {
         return Err(V2ContainerError::NotV2);
     }
@@ -428,7 +557,7 @@ pub fn read_sealed_container(
         .decrypt_block(ciphertext, 0)
         .map_err(|_| V2ContainerError::DecryptFailed)?;
 
-    Ok((envelope, plain))
+    Ok((envelope, plain, payload_class))
 }
 
 #[cfg(test)]
@@ -719,5 +848,77 @@ mod tests {
         // Total = V2_CONTAINER_PREFIX_LEN + (payload + 16) + V2_CONTAINER_SIG_LEN
         let expected = V2_CONTAINER_PREFIX_LEN + payload.len() + 16 + V2_CONTAINER_SIG_LEN;
         assert_eq!(container.len(), expected);
+    }
+
+    // -------------------------------------------------------------------------
+    // V2.2 PAYLOAD CLASS tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn payload_class_roundtrip_via_container() {
+        for &cls in &[
+            PayloadClass::Unspecified,
+            PayloadClass::Identity,
+            PayloadClass::Code,
+            PayloadClass::Document,
+            PayloadClass::Command,
+            PayloadClass::Receipt,
+        ] {
+            let sender = make_signing_key();
+            let receiver = make_signing_key();
+            let payload = b"payload-class-test";
+
+            let container = write_sealed_container_with_class(
+                &sender,
+                &receiver.verifying_key().to_bytes(),
+                payload,
+                cls,
+            )
+            .unwrap();
+
+            let (_env, recovered, decoded_cls) =
+                read_sealed_container_full(&container, &receiver).unwrap();
+            assert_eq!(recovered, payload, "payload roundtrip failed for {:?}", cls);
+            assert_eq!(decoded_cls, cls, "class roundtrip failed for {:?}", cls);
+        }
+    }
+
+    #[test]
+    fn payload_class_backward_compat_v21_archives() {
+        // A v2.1 archive (= class byte was always 0 / Unspecified) must
+        // still decode under v2.2 readers.
+        let sender = make_signing_key();
+        let receiver = make_signing_key();
+        let container = write_sealed_container(
+            &sender,
+            &receiver.verifying_key().to_bytes(),
+            b"legacy v2.1",
+        )
+        .unwrap();
+        // Reserved byte (= byte 3 of v2 header = byte 6 of container) must be 0
+        assert_eq!(container[6], 0);
+        let (_env, recovered, cls) =
+            read_sealed_container_full(&container, &receiver).unwrap();
+        assert_eq!(recovered, b"legacy v2.1");
+        assert_eq!(cls, PayloadClass::Unspecified);
+    }
+
+    #[test]
+    fn payload_class_label_parse_roundtrip() {
+        for &cls in &[
+            PayloadClass::Identity,
+            PayloadClass::Code,
+            PayloadClass::Document,
+            PayloadClass::Command,
+            PayloadClass::Receipt,
+        ] {
+            assert_eq!(PayloadClass::from_label(cls.label()), Some(cls));
+        }
+        // Aliases
+        assert_eq!(PayloadClass::from_label("id"), Some(PayloadClass::Identity));
+        assert_eq!(PayloadClass::from_label("DOC"), Some(PayloadClass::Document));
+        assert_eq!(PayloadClass::from_label("cmd"), Some(PayloadClass::Command));
+        // Unknown
+        assert_eq!(PayloadClass::from_label("hugotron"), None);
     }
 }

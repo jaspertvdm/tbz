@@ -2,7 +2,7 @@
 
 [package]
 name = "tbz-cli"
-version = "2.1.1"
+version = "2.2.0"
 edition = "2021"
 authors = ["Jasper van de Meent <info@humotica.com>"]
 license = "MIT OR Apache-2.0"
@@ -22,5 +22,5 @@ path = "src/main.rs"
 
 [dependencies]
 # path = local dev build; version = crates.io publish constraint
-tibet-zip-cli = { path = "../../crates/tbz-cli", version = "2.1.1" }
+tibet-zip-cli = { path = "../../crates/tbz-cli", version = "2.2.0" }
 anyhow = "1"

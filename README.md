@@ -117,17 +117,51 @@ Same archive, wrong receiver → different key → AEAD authentication fails. No
 tibet-zip keygen -o bob
 # → bob.priv + bob.pub
 
-# Seal a folder to Bob
-tibet-zip pack ./secrets -o sealed.tza \
+# Seal a folder to Bob with a declared payload class (v2.2+)
+tibet-zip pack ./secrets -o jasper.aint \
   --seal \
   --to <bob_pubkey_hex> \
   --from alice.priv     # optional; ephemeral if absent
+  --type identity       # one of: identity / code / document / command / receipt
 
 # Bob unpacks with his private key (auto-detects v2 from magic bytes)
-tibet-zip unpack sealed.tza -o ./out --as bob.priv
+tibet-zip unpack jasper.aint -o ./out --as bob.priv
 ```
 
 Anyone other than Bob trying `--as wrong.priv` gets `AEAD decryption failed (wrong receiver or tampered)`. The bytes never become plaintext.
+
+### v2.2 — declared payload class, mismatch warnings, audit trail
+
+v2.2 adds first-class semantic typing in the v2 header so the receiver
+sees *what kind* of payload is being delivered before any bytes touch
+disk. Three layers of hint:
+
+```bash
+# Pack with declared class
+tibet-zip pack ./id-bundle -o jasper.aint \
+  --seal --to <pub> --type identity
+
+# Unpack shows declared class + previews the inner manifest BEFORE extract
+tibet-zip unpack jasper.aint -o out/ --as bob.priv
+#   Declared payload class: identity
+#   Preview (= no disk write yet):
+#     [  1] data.txt    24 bytes   JIS 0
+
+# If the filename extension doesn't match the declared class, warn
+tibet-zip unpack logboek.txt -o out/ --as bob.priv
+#   ⚠ payload-class hint: outer .txt but declared class = identity
+
+# --strict-type makes mismatches and inner-executable warnings fatal
+tibet-zip unpack onschuldig.txt -o out/ --as bob.priv --strict-type
+#   ⚠ executable file(s) found inside a non-code envelope: virus.bat
+#   Error: strict-type: ...
+```
+
+Every v2 unseal (success or failure) is logged as a
+`tbz-unseal.v1` JSONL record so a SOC can monitor identity-bound
+extractions. Set `$TBZ_UNSEAL_AUDIT_LOG` to override the path,
+default falls back to `/var/log/tibet/tbz-unseal.jsonl` or
+`$XDG_STATE_HOME/tbz/audit.jsonl`.
 
 ## Example Output
 
