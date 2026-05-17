@@ -1331,23 +1331,10 @@ dependencies = [
 
 [[package]]
 name = "tbz-cli"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "anyhow",
- "clap",
- "hex",
- "serde",
- "serde_json",
- "sha2",
- "tibet-zip-airlock",
- "tibet-zip-core",
- "tibet-zip-jis",
- "tibet-zip-mirror",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "ureq",
- "zip",
+ "tibet-zip-cli",
 ]
 
 [[package]]
@@ -1381,9 +1368,7 @@ dependencies = [
 
 [[package]]
 name = "tibet-zip-airlock"
-version = "2.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f53d64253f4b7af19104ad495ee0126c56f84f70a5ec812b2a97fb20842851a4"
+version = "2.1.1"
 dependencies = [
  "bytes",
  "libc",
@@ -1395,10 +1380,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "tibet-zip-cli"
+version = "2.1.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ed25519-dalek",
+ "hex",
+ "rand",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tibet-zip-airlock",
+ "tibet-zip-core",
+ "tibet-zip-jis",
+ "tibet-zip-mirror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "ureq",
+ "zip",
+]
+
+[[package]]
 name = "tibet-zip-core"
-version = "2.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "244fa11168ee701f0d458683ad147198cbefea21074dd133c8dd5f20707d7d5d"
+version = "2.1.1"
 dependencies = [
  "aes-gcm",
  "byteorder",
@@ -1416,9 +1422,7 @@ dependencies = [
 
 [[package]]
 name = "tibet-zip-jis"
-version = "2.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7bc12196f9c24537201209d5924b196be217cb298a2d9490406513d48919a982"
+version = "2.1.1"
 dependencies = [
  "ed25519-dalek",
  "glob",
@@ -1431,9 +1435,7 @@ dependencies = [
 
 [[package]]
 name = "tibet-zip-mirror"
-version = "2.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ac1d90c5f0136e5c68741c9352aff9b502119552fb954abae306648ac8a9c85"
+version = "2.1.1"
 dependencies = [
  "serde",
  "serde_json",

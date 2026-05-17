@@ -2,6 +2,30 @@
 
 All notable changes to TBZ (TIBET-zip) are documented here.
 
+## [2.1.1] — 2026-05-17
+
+### Fixed
+
+- **`tbz-cli` alias was a stale copy from April, not a real alias.**
+  Bumping the alias version did not sync the code, so users who ran
+  `cargo install tbz-cli@2.1.0` got the pre-v2 CLI without `keygen`
+  or `--seal` flags despite the version string showing 2.1.0.
+
+### Refactored
+
+- `tibet-zip-cli` is now both a library (`pub fn run()`) and a binary
+  crate. The canonical binary is a 3-line shim:
+  `fn main() -> anyhow::Result<()> { tibet_zip_cli::run() }`.
+- The `tbz-cli` alias also becomes a 3-line shim depending on
+  `tibet-zip-cli` as a library. No more source duplication, no more
+  drift possible between alias and canonical.
+
+### Yanked
+
+- `tbz-cli@2.1.0` was yanked from crates.io (stale code from April).
+  Use `tibet-zip-cli@2.1.1` or `tbz-cli@2.1.1` — both are functionally
+  identical and call the same `tibet_zip_cli::run()`.
+
 ## [2.1.0] — 2026-05-17
 
 ### Added — v2 sealed-archive CLI

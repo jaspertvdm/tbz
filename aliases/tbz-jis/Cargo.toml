@@ -2,7 +2,7 @@
 
 [package]
 name = "tbz-jis"
-version = "2.1.0"
+version = "2.1.1"
 edition = "2021"
 authors = ["Jasper van de Meent <info@humotica.com>"]
 license = "MIT OR Apache-2.0"
@@ -13,4 +13,4 @@ keywords = ["security", "identity", "authorization", "provenance", "zero-trust"]
 categories = ["authentication", "cryptography"]
 
 [dependencies]
-tibet-zip-jis = "2.1.0"
+tibet-zip-jis = "2.1.1"

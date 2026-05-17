@@ -2,13 +2,13 @@
 
 [package]
 name = "tbz-cli"
-version = "2.1.0"
+version = "2.1.1"
 edition = "2021"
 authors = ["Jasper van de Meent <info@humotica.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/jaspertvdm/tbz"
 readme = "../../README.md"
-description = "Alias for tibet-zip-cli — pack, unpack, verify, inspect TBZ archives"
+description = "Alias for tibet-zip-cli — thin shim delegating to tibet_zip_cli::run() for tbz / tibet-zip binaries"
 keywords = ["compression", "security", "cli", "archive", "zero-trust"]
 categories = ["command-line-utilities", "compression", "cryptography"]
 
@@ -21,18 +21,6 @@ name = "tbz"
 path = "src/main.rs"
 
 [dependencies]
-tbz-core = { package = "tibet-zip-core", version = "2.1.0" }
-tbz-airlock = { package = "tibet-zip-airlock", version = "2.1.0" }
-tbz-mirror = { package = "tibet-zip-mirror", version = "2.1.0" }
-tbz-jis = { package = "tibet-zip-jis", version = "2.1.0" }
-clap = { version = "4", features = ["derive", "env"] }
-tokio = { version = "1", features = ["full"] }
+# path = local dev build; version = crates.io publish constraint
+tibet-zip-cli = { path = "../../crates/tbz-cli", version = "2.1.1" }
 anyhow = "1"
-tracing = "0.1"
-tracing-subscriber = "0.3"
-serde_json = "1"
-serde = { version = "1", features = ["derive"] }
-ureq = { version = "2", features = ["json"] }
-sha2 = "0.10"
-hex = "0.4"
-zip = "2"
