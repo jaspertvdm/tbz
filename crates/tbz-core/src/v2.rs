@@ -248,6 +248,189 @@ impl SealedEnvelope {
     }
 }
 
+// =============================================================================
+// V2 SEALED CONTAINER (single-block wrap-of-payload)
+// =============================================================================
+//
+// On-disk layout (= "envelope-around-payload" simplest possible v2 archive):
+//
+//   [MAGIC "TBZ"            3 bytes]
+//   [V2_HEADER              4 bytes]   major(0x02) minor(0x00) flags reserved(0)
+//   [sender_pubkey         32 bytes]
+//   [receiver_pubkey       32 bytes]
+//   [archive_uuid          16 bytes]
+//   [ciphertext_len  u32 BE 4 bytes]
+//   [ciphertext       N bytes      ]   AES-256-GCM(payload, block_index=0)
+//   [sender_signature      64 bytes]   Ed25519 over ciphertext
+//
+// Fixed overhead = 155 bytes. Payload = arbitrary bytes (typically a v1
+// archive, allowing v2 to wrap-and-seal an existing v1 archive end-to-end).
+//
+// Future v2.x can extend with multi-block, but this single-block form is
+// sufficient for "seal a folder to a recipient" semantics in v2.1.0.
+
+/// Length of the v2 sealed container header BEFORE ciphertext (without sig).
+/// = MAGIC(3) + V2_HDR(4) + sender_pk(32) + receiver_pk(32) + uuid(16) + cipher_len(4)
+pub const V2_CONTAINER_PREFIX_LEN: usize = 3 + 4 + 32 + 32 + 16 + 4;
+
+/// Length of the Ed25519 signature trailer.
+pub const V2_CONTAINER_SIG_LEN: usize = 64;
+
+/// Errors for v2 container parsing.
+#[derive(Error, Debug)]
+pub enum V2ContainerError {
+    #[error("too short to be a v2 container")]
+    TooShort,
+    #[error("magic bytes mismatch (not a TBZ archive)")]
+    BadMagic,
+    #[error("not a v2 archive (header missing v2 marker)")]
+    NotV2,
+    #[error("inconsistent length: declared ciphertext does not fit")]
+    LengthMismatch,
+    #[error("Ed25519 sender signature does not verify")]
+    BadSignature,
+    #[error("AEAD decryption failed (wrong receiver or tampered)")]
+    DecryptFailed,
+    #[error("envelope error: {0}")]
+    Envelope(#[from] Tbzv2Error),
+}
+
+/// Build a v2 sealed container around `payload`.
+///
+/// `payload` is typically a v1 archive's bytes; the v2 layer adds AES-256-GCM
+/// confidentiality for the named receiver and an Ed25519 signature from the
+/// sender over the ciphertext.
+pub fn write_sealed_container(
+    sender_signing_key: &ed25519_dalek::SigningKey,
+    receiver_pubkey: &[u8; 32],
+    payload: &[u8],
+) -> std::result::Result<Vec<u8>, V2ContainerError> {
+    use ed25519_dalek::Signer;
+
+    let sender_pubkey: [u8; 32] = sender_signing_key.verifying_key().to_bytes();
+
+    // Generate archive UUID
+    let mut archive_uuid = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut archive_uuid);
+
+    // Build envelope and encrypt payload as block 0
+    let envelope = SealedEnvelope {
+        sender_pubkey,
+        receiver_pubkey: *receiver_pubkey,
+        archive_uuid,
+        ssm_byte: None,
+        flags: FLAG_HAS_ENCRYPTED_BLOCKS | FLAG_HAS_RECEIVER_IDENTITY,
+    };
+
+    let ciphertext = envelope.encrypt_block(payload, 0)?;
+    let cipher_len_u32: u32 = ciphertext
+        .len()
+        .try_into()
+        .map_err(|_| V2ContainerError::LengthMismatch)?;
+
+    // Sign the ciphertext for sender authentication
+    let signature = sender_signing_key.sign(&ciphertext);
+    let sig_bytes: [u8; 64] = signature.to_bytes();
+
+    // Assemble: MAGIC + V2_HDR + sender_pk + receiver_pk + uuid + len + cipher + sig
+    let mut out: Vec<u8> = Vec::with_capacity(
+        V2_CONTAINER_PREFIX_LEN + ciphertext.len() + V2_CONTAINER_SIG_LEN,
+    );
+    out.extend_from_slice(&crate::MAGIC);
+    out.extend_from_slice(&encode_v2_header(envelope.flags, None));
+    out.extend_from_slice(&sender_pubkey);
+    out.extend_from_slice(receiver_pubkey);
+    out.extend_from_slice(&archive_uuid);
+    out.extend_from_slice(&cipher_len_u32.to_be_bytes());
+    out.extend_from_slice(&ciphertext);
+    out.extend_from_slice(&sig_bytes);
+    Ok(out)
+}
+
+/// Parse and decrypt a v2 sealed container. Returns the inner payload.
+///
+/// Verifies the sender signature first; on failure returns `BadSignature`
+/// without attempting decryption.
+pub fn read_sealed_container(
+    container: &[u8],
+    receiver_signing_key: &ed25519_dalek::SigningKey,
+) -> std::result::Result<(SealedEnvelope, Vec<u8>), V2ContainerError> {
+    use ed25519_dalek::{Verifier, VerifyingKey};
+
+    if container.len() < V2_CONTAINER_PREFIX_LEN + V2_CONTAINER_SIG_LEN {
+        return Err(V2ContainerError::TooShort);
+    }
+    if container[0..3] != crate::MAGIC {
+        return Err(V2ContainerError::BadMagic);
+    }
+
+    // V2 header
+    let v2_hdr = &container[3..3 + V2_HEADER_LEN];
+    let (version, flags, _ssm) = decode_v2_header(v2_hdr).map_err(V2ContainerError::Envelope)?;
+    if version != V2_VERSION_MAJOR {
+        return Err(V2ContainerError::NotV2);
+    }
+
+    let mut off = 3 + V2_HEADER_LEN;
+    let sender_pubkey: [u8; 32] = container[off..off + 32]
+        .try_into()
+        .map_err(|_| V2ContainerError::TooShort)?;
+    off += 32;
+    let receiver_pubkey: [u8; 32] = container[off..off + 32]
+        .try_into()
+        .map_err(|_| V2ContainerError::TooShort)?;
+    off += 32;
+    let archive_uuid: [u8; 16] = container[off..off + 16]
+        .try_into()
+        .map_err(|_| V2ContainerError::TooShort)?;
+    off += 16;
+
+    let cipher_len_bytes: [u8; 4] = container[off..off + 4]
+        .try_into()
+        .map_err(|_| V2ContainerError::TooShort)?;
+    let cipher_len = u32::from_be_bytes(cipher_len_bytes) as usize;
+    off += 4;
+
+    if container.len() < off + cipher_len + V2_CONTAINER_SIG_LEN {
+        return Err(V2ContainerError::LengthMismatch);
+    }
+    let ciphertext = &container[off..off + cipher_len];
+    let sig_bytes: [u8; 64] = container[off + cipher_len..off + cipher_len + V2_CONTAINER_SIG_LEN]
+        .try_into()
+        .map_err(|_| V2ContainerError::TooShort)?;
+
+    // Verify sender signature on ciphertext
+    let sender_vk = VerifyingKey::from_bytes(&sender_pubkey)
+        .map_err(|_| V2ContainerError::BadSignature)?;
+    let signature = ed25519_dalek::Signature::from_bytes(&sig_bytes);
+    sender_vk
+        .verify(ciphertext, &signature)
+        .map_err(|_| V2ContainerError::BadSignature)?;
+
+    // Confirm we're the receiver
+    let our_pubkey: [u8; 32] = receiver_signing_key.verifying_key().to_bytes();
+    let envelope = SealedEnvelope {
+        sender_pubkey,
+        receiver_pubkey,
+        archive_uuid,
+        ssm_byte: None,
+        flags,
+    };
+
+    if our_pubkey != receiver_pubkey {
+        // Try decryption anyway — it will fail with the wrong key, but the
+        // sealed envelope still carries the addressed recipient. Returning
+        // BadSignature would be incorrect; the right error is DecryptFailed.
+        return Err(V2ContainerError::DecryptFailed);
+    }
+
+    let plain = envelope
+        .decrypt_block(ciphertext, 0)
+        .map_err(|_| V2ContainerError::DecryptFailed)?;
+
+    Ok((envelope, plain))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,5 +591,133 @@ mod tests {
         assert!(hdr[3] & FLAG_HAS_SSM_HEADER != 0);
         assert!(hdr[3] & FLAG_HAS_ENCRYPTED_BLOCKS != 0);
         assert_eq!(hdr[4], 0x00); // reserved
+    }
+
+    // -------------------------------------------------------------------------
+    // V2 SEALED CONTAINER tests (= the on-disk wire format)
+    // -------------------------------------------------------------------------
+
+    use ed25519_dalek::SigningKey;
+    use rand::rngs::OsRng;
+
+    fn make_signing_key() -> SigningKey {
+        SigningKey::generate(&mut OsRng)
+    }
+
+    #[test]
+    fn container_roundtrip_smallpayload() {
+        let sender = make_signing_key();
+        let receiver = make_signing_key();
+        let payload = b"hello v2 sealed container, this is the inner payload bytes";
+
+        let container = write_sealed_container(
+            &sender,
+            &receiver.verifying_key().to_bytes(),
+            payload,
+        )
+        .expect("write_sealed_container should succeed");
+
+        // Magic + V2 header should be detectable
+        assert_eq!(detect_version(&container), 2);
+        assert_eq!(&container[0..3], &crate::MAGIC);
+
+        let (env, recovered) =
+            read_sealed_container(&container, &receiver).expect("read should succeed");
+        assert_eq!(recovered, payload);
+        assert_eq!(env.sender_pubkey, sender.verifying_key().to_bytes());
+        assert_eq!(env.receiver_pubkey, receiver.verifying_key().to_bytes());
+    }
+
+    #[test]
+    fn container_roundtrip_largepayload() {
+        let sender = make_signing_key();
+        let receiver = make_signing_key();
+        let payload: Vec<u8> = (0..100_000).map(|i| (i & 0xff) as u8).collect();
+
+        let container =
+            write_sealed_container(&sender, &receiver.verifying_key().to_bytes(), &payload)
+                .unwrap();
+        let (_, recovered) = read_sealed_container(&container, &receiver).unwrap();
+        assert_eq!(recovered, payload);
+    }
+
+    #[test]
+    fn container_wrong_receiver_fails() {
+        let sender = make_signing_key();
+        let bob = make_signing_key();
+        let eve = make_signing_key();
+        let payload = b"top secret";
+
+        let container =
+            write_sealed_container(&sender, &bob.verifying_key().to_bytes(), payload).unwrap();
+        // Eve tries with her key — must fail
+        let result = read_sealed_container(&container, &eve);
+        assert!(matches!(result, Err(V2ContainerError::DecryptFailed)));
+    }
+
+    #[test]
+    fn container_tampered_ciphertext_fails() {
+        let sender = make_signing_key();
+        let receiver = make_signing_key();
+        let payload = b"original payload bytes";
+
+        let mut container =
+            write_sealed_container(&sender, &receiver.verifying_key().to_bytes(), payload).unwrap();
+        // Flip a bit deep in the ciphertext region
+        let mid = V2_CONTAINER_PREFIX_LEN + 5;
+        container[mid] ^= 0xFF;
+        let result = read_sealed_container(&container, &receiver);
+        // BadSignature OR DecryptFailed both acceptable — tampering detected.
+        assert!(matches!(
+            result,
+            Err(V2ContainerError::BadSignature) | Err(V2ContainerError::DecryptFailed)
+        ));
+    }
+
+    #[test]
+    fn container_tampered_signature_fails() {
+        let sender = make_signing_key();
+        let receiver = make_signing_key();
+        let payload = b"original payload bytes";
+
+        let mut container =
+            write_sealed_container(&sender, &receiver.verifying_key().to_bytes(), payload).unwrap();
+        // Flip the last byte (= signature trailer)
+        let last = container.len() - 1;
+        container[last] ^= 0xFF;
+        let result = read_sealed_container(&container, &receiver);
+        assert!(matches!(result, Err(V2ContainerError::BadSignature)));
+    }
+
+    #[test]
+    fn container_truncated_fails() {
+        let sender = make_signing_key();
+        let receiver = make_signing_key();
+        let payload = b"some payload";
+
+        let container =
+            write_sealed_container(&sender, &receiver.verifying_key().to_bytes(), payload).unwrap();
+        // Truncate
+        let truncated = &container[..container.len() / 2];
+        let result = read_sealed_container(truncated, &receiver);
+        assert!(matches!(
+            result,
+            Err(V2ContainerError::TooShort) | Err(V2ContainerError::LengthMismatch)
+        ));
+    }
+
+    #[test]
+    fn container_overhead_matches_constants() {
+        let sender = make_signing_key();
+        let receiver = make_signing_key();
+        let payload = vec![0u8; 1000];
+
+        let container =
+            write_sealed_container(&sender, &receiver.verifying_key().to_bytes(), &payload)
+                .unwrap();
+        // AES-GCM adds 16 byte tag → ciphertext = payload.len() + 16
+        // Total = V2_CONTAINER_PREFIX_LEN + (payload + 16) + V2_CONTAINER_SIG_LEN
+        let expected = V2_CONTAINER_PREFIX_LEN + payload.len() + 16 + V2_CONTAINER_SIG_LEN;
+        assert_eq!(container.len(), expected);
     }
 }

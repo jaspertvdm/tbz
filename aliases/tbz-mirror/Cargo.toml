@@ -2,7 +2,7 @@
 
 [package]
 name = "tbz-mirror"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2021"
 authors = ["Jasper van de Meent <info@humotica.com>"]
 license = "MIT OR Apache-2.0"
@@ -13,4 +13,4 @@ keywords = ["security", "transparency", "supply-chain", "provenance", "zero-trus
 categories = ["database", "cryptography"]
 
 [dependencies]
-tibet-zip-mirror = "2.0.0"
+tibet-zip-mirror = "2.1.0"

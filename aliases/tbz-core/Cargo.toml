@@ -2,7 +2,7 @@
 
 [package]
 name = "tbz-core"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2021"
 authors = ["Jasper van de Meent <info@humotica.com>"]
 license = "MIT OR Apache-2.0"
@@ -13,4 +13,4 @@ keywords = ["compression", "security", "provenance", "ed25519", "zero-trust"]
 categories = ["compression", "cryptography"]
 
 [dependencies]
-tibet-zip-core = "2.0.0"
+tibet-zip-core = "2.1.0"

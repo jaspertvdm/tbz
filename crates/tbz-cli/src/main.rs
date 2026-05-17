@@ -26,6 +26,7 @@ use sha2::{Digest, Sha256};
 use tbz_core::envelope::TibetEnvelope;
 use tbz_core::manifest::{BlockEntry, Manifest};
 use tbz_core::stream::{TbzReader, TbzWriter};
+use tbz_core::v2;
 use tbz_core::{signature, BlockType};
 
 mod tibet_zip;
@@ -176,6 +177,9 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Create a TBZ archive from a file or directory
+    ///
+    /// Default = v1 transparent archive. Pass --seal --to <pubkey-hex> to
+    /// produce a v2 sealed envelope (AES-256-GCM, identity-bound).
     #[command(alias = "p")]
     Pack {
         /// Path to file or directory to archive
@@ -186,9 +190,21 @@ enum Commands {
         /// JIS authorization level for all blocks (default: 0)
         #[arg(long, default_value = "0")]
         jis_level: u8,
+        /// Seal the archive (= v2): wrap in an AES-256-GCM envelope.
+        #[arg(long)]
+        seal: bool,
+        /// Receiver's Ed25519 public key (hex, 64 chars). Required with --seal.
+        #[arg(long, value_name = "PUBKEY_HEX")]
+        to: Option<String>,
+        /// Sender's Ed25519 private key file (hex). Optional; ephemeral if absent.
+        #[arg(long, value_name = "PRIVKEY_PATH")]
+        from: Option<String>,
     },
 
     /// Extract a TBZ archive via the TIBET Airlock
+    ///
+    /// Auto-detects v1 vs v2 from magic bytes. For v2 sealed archives,
+    /// pass --as <privkey-path> to decrypt as the named receiver.
     #[command(alias = "x")]
     Unpack {
         /// Path to the TBZ archive
@@ -196,6 +212,9 @@ enum Commands {
         /// Output directory
         #[arg(short, long, default_value = ".")]
         output: String,
+        /// Receiver's Ed25519 private key file (hex). Required for v2 sealed archives.
+        #[arg(long = "as", value_name = "PRIVKEY_PATH")]
+        as_key: Option<String>,
     },
 
     /// Validate a TBZ archive without extracting
@@ -224,6 +243,15 @@ enum Commands {
         #[arg(long)]
         repo: Option<String>,
     },
+
+    /// Generate an Ed25519 keypair for v2 sealed archives
+    ///
+    /// Writes <output>.priv (32-byte hex, mode 0600) and <output>.pub (32-byte hex).
+    Keygen {
+        /// Output basename — produces <output>.priv and <output>.pub
+        #[arg(short, long, default_value = "tbz-key")]
+        output: String,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -241,11 +269,22 @@ fn main() -> anyhow::Result<()> {
     // If a subcommand was given, use it directly
     if let Some(command) = cli.command {
         return match command {
-            Commands::Pack { path, output, jis_level } => cmd_pack(&path, &output, jis_level, mirror_url),
-            Commands::Unpack { archive, output } => cmd_unpack(&archive, &output),
+            Commands::Pack { path, output, jis_level, seal, to, from } => {
+                if seal {
+                    let to_hex = to.ok_or_else(|| anyhow::anyhow!(
+                        "--seal requires --to <pubkey-hex> (64 hex chars)"))?;
+                    cmd_pack_sealed(&path, &output, jis_level, mirror_url, &to_hex, from.as_deref())
+                } else {
+                    cmd_pack(&path, &output, jis_level, mirror_url)
+                }
+            }
+            Commands::Unpack { archive, output, as_key } => {
+                cmd_unpack_dispatch(&archive, &output, as_key.as_deref())
+            }
             Commands::Verify { archive } => cmd_verify(&archive, mirror_url),
             Commands::Inspect { archive } => cmd_inspect(&archive),
             Commands::Init { platform, account, repo } => cmd_init(&platform, account, repo),
+            Commands::Keygen { output } => cmd_keygen(&output),
         };
     }
 
@@ -964,10 +1003,204 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
+fn hex_decode_32(s: &str) -> anyhow::Result<[u8; 32]> {
+    let s = s.trim();
+    if s.len() != 64 {
+        anyhow::bail!("expected 64 hex characters, got {}", s.len());
+    }
+    let mut out = [0u8; 32];
+    for (i, chunk) in s.as_bytes().chunks(2).enumerate() {
+        let pair = std::str::from_utf8(chunk).map_err(|_| anyhow::anyhow!("invalid utf8"))?;
+        out[i] = u8::from_str_radix(pair, 16)
+            .map_err(|e| anyhow::anyhow!("invalid hex pair '{}': {}", pair, e))?;
+    }
+    Ok(out)
+}
+
+fn read_signing_key_from_file(path: &str) -> anyhow::Result<ed25519_dalek::SigningKey> {
+    let raw = fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("cannot read key file {}: {}", path, e))?;
+    let bytes = hex_decode_32(&raw)?;
+    Ok(ed25519_dalek::SigningKey::from_bytes(&bytes))
+}
+
 fn chrono_now() -> String {
     use std::time::SystemTime;
     let duration = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
     format!("{}Z", duration.as_secs())
+}
+
+// ---------------------------------------------------------------------------
+// v2.1.0 NEW SUBCOMMANDS — Keygen, Pack --seal, Unpack --as
+// ---------------------------------------------------------------------------
+
+fn cmd_keygen(output: &str) -> anyhow::Result<()> {
+    use ed25519_dalek::SigningKey;
+    use rand::rngs::OsRng;
+
+    let signing_key = SigningKey::generate(&mut OsRng);
+    let verifying_key = signing_key.verifying_key();
+
+    let priv_path = format!("{}.priv", output);
+    let pub_path = format!("{}.pub", output);
+
+    // Write private key (hex) with 0600 permissions
+    let priv_hex = hex_encode(&signing_key.to_bytes());
+    fs::write(&priv_path, &priv_hex)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = fs::Permissions::from_mode(0o600);
+        fs::set_permissions(&priv_path, perms)?;
+    }
+
+    let pub_hex = hex_encode(&verifying_key.to_bytes());
+    fs::write(&pub_path, &pub_hex)?;
+
+    println!("TBZ keygen: Ed25519 keypair generated\n");
+    println!("  Private: {} (mode 0600)", priv_path);
+    println!("  Public:  {}", pub_path);
+    println!("\n  Pubkey (share this): {}", pub_hex);
+    println!("\n  Use with:");
+    println!("    tibet-zip pack <dir> -o sealed.tza --seal --to {} --from {}", pub_hex, priv_path);
+    println!("    tibet-zip unpack sealed.tza -o out/ --as {}", priv_path);
+    Ok(())
+}
+
+fn cmd_pack_sealed(
+    path: &str,
+    output: &str,
+    default_jis_level: u8,
+    mirror_url: Option<&str>,
+    receiver_hex: &str,
+    sender_priv_path: Option<&str>,
+) -> anyhow::Result<()> {
+    let source = Path::new(path);
+    if !source.exists() {
+        anyhow::bail!("Source path does not exist: {}", path);
+    }
+    let receiver_pubkey = hex_decode_32(receiver_hex)
+        .map_err(|e| anyhow::anyhow!("--to pubkey: {}", e))?;
+
+    // Sender key: from --from or ephemeral
+    let sender_key = match sender_priv_path {
+        Some(p) => read_signing_key_from_file(p)?,
+        None => {
+            use rand::rngs::OsRng;
+            ed25519_dalek::SigningKey::generate(&mut OsRng)
+        }
+    };
+
+    println!("TBZ pack (sealed v2): {} → {}", path, output);
+    println!("  Sender pubkey:   {}", hex_encode(&sender_key.verifying_key().to_bytes()));
+    println!("  Receiver pubkey: {}", receiver_hex);
+
+    // Build the v1 archive in memory (Vec<u8> buffer)
+    let v1_bytes = build_v1_archive_bytes(source, default_jis_level, mirror_url)?;
+    println!("\n  Inner v1 archive: {} bytes", v1_bytes.len());
+
+    // Wrap in v2 sealed container
+    let container = v2::write_sealed_container(&sender_key, &receiver_pubkey, &v1_bytes)
+        .map_err(|e| anyhow::anyhow!("v2 seal failed: {}", e))?;
+
+    fs::write(output, &container)?;
+    println!("  Outer v2 envelope: {} bytes (overhead: {} bytes)", container.len(), container.len() - v1_bytes.len());
+    println!("\n  Sealed: {} ✓", output);
+    println!("  Format: TBZ v2 (AES-256-GCM, Ed25519-signed)");
+    Ok(())
+}
+
+/// Build a v1 archive in memory as Vec<u8>. Refactored from cmd_pack so we
+/// can wrap the bytes in a v2 sealed envelope.
+fn build_v1_archive_bytes(
+    source: &Path,
+    default_jis_level: u8,
+    _mirror_url: Option<&str>,
+) -> anyhow::Result<Vec<u8>> {
+    let files = collect_files(source)?;
+    let jis_manifest = tbz_jis::JisManifest::load(Path::new(".")).ok();
+
+    let (signing_key, verifying_key) = signature::generate_keypair();
+
+    let mut manifest = Manifest::new();
+    for (i, (file_path, data)) in files.iter().enumerate() {
+        let jis_level = jis_manifest
+            .as_ref()
+            .map(|j| j.jis_level_for_path(file_path))
+            .unwrap_or(default_jis_level);
+
+        manifest.add_block(BlockEntry {
+            index: (i + 1) as u32,
+            block_type: "data".to_string(),
+            compressed_size: 0,
+            uncompressed_size: data.len() as u64,
+            jis_level,
+            description: file_path.clone(),
+            path: Some(file_path.clone()),
+        });
+    }
+    manifest.set_signing_key(&verifying_key);
+
+    let mut buf: Vec<u8> = Vec::new();
+    {
+        let mut writer = TbzWriter::new(&mut buf, signing_key);
+        writer.write_manifest(&manifest)?;
+        for (file_path, data) in &files {
+            let jis_level = jis_manifest
+                .as_ref()
+                .map(|j| j.jis_level_for_path(file_path))
+                .unwrap_or(default_jis_level);
+            let envelope = TibetEnvelope::new(
+                signature::sha256_hash(data),
+                "data",
+                mime_for_path(file_path),
+                "tbz-cli",
+                &format!("Pack file: {}", file_path),
+                vec!["block:0".to_string()],
+            );
+            let envelope = if let Some(ref jis) = jis_manifest {
+                envelope.with_source_repo(&jis.repo_identifier())
+            } else {
+                envelope
+            };
+            writer.write_data_block(data, jis_level, &envelope)?;
+        }
+        writer.finish();
+    }
+    Ok(buf)
+}
+
+/// Dispatch unpack: detect v1 vs v2 and route accordingly.
+fn cmd_unpack_dispatch(archive: &str, output_dir: &str, as_key: Option<&str>) -> anyhow::Result<()> {
+    // Peek first 32 bytes to detect version
+    let mut head = [0u8; 32];
+    let n = {
+        let mut f = fs::File::open(archive)?;
+        std::io::Read::read(&mut f, &mut head)?
+    };
+    let version = if n >= 7 { v2::detect_version(&head[..n]) } else { 0 };
+
+    if version == 2 {
+        let priv_path = as_key.ok_or_else(|| anyhow::anyhow!(
+            "{} is a v2 sealed archive — pass --as <privkey-path> to decrypt", archive))?;
+        let receiver_key = read_signing_key_from_file(priv_path)?;
+        println!("TBZ unpack (v2 sealed): {} → {}", archive, output_dir);
+        let container = fs::read(archive)?;
+        let (env, plain) = v2::read_sealed_container(&container, &receiver_key)
+            .map_err(|e| anyhow::anyhow!("v2 unseal failed: {}", e))?;
+        println!("  Sender:   {}", hex_encode(&env.sender_pubkey));
+        println!("  Receiver: {} ✓", hex_encode(&env.receiver_pubkey));
+        println!("  Inner v1 archive: {} bytes\n", plain.len());
+
+        // Write to temp file, then call cmd_unpack with that file
+        let tmp = std::env::temp_dir().join(format!("tbz-v2-inner-{}.tza", std::process::id()));
+        fs::write(&tmp, &plain)?;
+        let result = cmd_unpack(tmp.to_str().unwrap(), output_dir);
+        let _ = fs::remove_file(&tmp);
+        result
+    } else {
+        cmd_unpack(archive, output_dir)
+    }
 }

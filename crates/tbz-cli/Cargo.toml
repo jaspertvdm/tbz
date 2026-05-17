@@ -19,10 +19,10 @@ name = "tbz"
 path = "src/main.rs"
 
 [dependencies]
-tbz-core = { package = "tibet-zip-core", path = "../tbz-core", version = "2.0.0" }
-tbz-airlock = { package = "tibet-zip-airlock", path = "../tbz-airlock", version = "2.0.0" }
-tbz-mirror = { package = "tibet-zip-mirror", path = "../tbz-mirror", version = "2.0.0" }
-tbz-jis = { package = "tibet-zip-jis", path = "../tbz-jis", version = "2.0.0" }
+tbz-core = { package = "tibet-zip-core", path = "../tbz-core", version = "2.1.0" }
+tbz-airlock = { package = "tibet-zip-airlock", path = "../tbz-airlock", version = "2.1.0" }
+tbz-mirror = { package = "tibet-zip-mirror", path = "../tbz-mirror", version = "2.1.0" }
+tbz-jis = { package = "tibet-zip-jis", path = "../tbz-jis", version = "2.1.0" }
 clap.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
@@ -32,5 +32,7 @@ serde_json.workspace = true
 serde.workspace = true
 ureq.workspace = true
 sha2.workspace = true
+ed25519-dalek.workspace = true
+rand.workspace = true
 hex = "0.4"
 zip = "2"

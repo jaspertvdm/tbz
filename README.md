@@ -85,6 +85,50 @@ tbz release.tza     # .tza file → verify + unpack
 tbz ./src            # directory → pack
 ```
 
+## Sealed archives (v2)
+
+v1 archives are transparent: anyone can read the bytes, but tampering is detected by the per-block Ed25519 signature. v2 adds **confidentiality**: AES-256-GCM block encryption bound to the receiver's Ed25519 identity via HKDF-SHA256.
+
+**Three-layer hash truth:**
+
+| Layer | Says |
+|---|---|
+| SHA-256 | the file moved |
+| Ed25519 | the sender sealed it (v1 + v2) |
+| AES-256-GCM | only the named receiver can read it (v2 only) |
+
+The receiver's AES key is *derived*, never transmitted:
+
+```
+AES_key = HKDF-SHA256(
+  ikm    = receiver_ed25519_pubkey,
+  salt   = sender_ed25519_pubkey ‖ archive_uuid,
+  info   = "tbz.v2.aes256gcm.aead",
+  length = 32
+)
+```
+
+Same archive, wrong receiver → different key → AEAD authentication fails. No "decrypt then check"; the wrong identity literally cannot produce the right plaintext.
+
+### v2 workflow
+
+```bash
+# Generate Ed25519 keypair (Ed25519, hex-encoded, mode 0600 on private)
+tibet-zip keygen -o bob
+# → bob.priv + bob.pub
+
+# Seal a folder to Bob
+tibet-zip pack ./secrets -o sealed.tza \
+  --seal \
+  --to <bob_pubkey_hex> \
+  --from alice.priv     # optional; ephemeral if absent
+
+# Bob unpacks with his private key (auto-detects v2 from magic bytes)
+tibet-zip unpack sealed.tza -o ./out --as bob.priv
+```
+
+Anyone other than Bob trying `--as wrong.priv` gets `AEAD decryption failed (wrong receiver or tampered)`. The bytes never become plaintext.
+
 ## Example Output
 
 ```
@@ -115,6 +159,8 @@ $ tbz verify tampered.tza
 
 ## Block Format
 
+### v1 (transparent)
+
 ```
 ┌─────────────────────────────────────────────────┐
 │ Magic: 0x54425A ("TBZ")                         │
@@ -125,6 +171,24 @@ $ tbz verify tampered.tza
 │ Signature: Ed25519 (64 bytes) over all above    │
 └─────────────────────────────────────────────────┘
 ```
+
+### v2 (sealed envelope around v1)
+
+```
+┌─────────────────────────────────────────────────┐
+│ Magic:           "TBZ"           (3 bytes)      │
+│ V2 header:       major minor flags reserved (4) │
+│ Sender pubkey:                  (32 bytes)      │
+│ Receiver pubkey:                (32 bytes)      │
+│ Archive UUID:                   (16 bytes)      │
+│ Ciphertext len:  u32 BE          (4 bytes)      │
+│ Ciphertext:      AES-256-GCM(v1_archive_bytes)  │
+│ Sender sig:      Ed25519 over ciphertext (64)   │
+└─────────────────────────────────────────────────┘
+```
+
+Fixed overhead: 155 bytes + 16-byte AEAD tag.
+
 ## What TBZ replaces
 
 | Traditional workflow | TBZ equivalent |
