@@ -47,6 +47,18 @@ pub struct BlockEntry {
     /// Original file path (for file-based archives)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// Chunking: a file larger than the airlock per-block cap is split at pack time into ordered
+    /// chunks, each its own signed/hashed block (so every block still fits the airlock's bounded RAM).
+    /// `chunk_of` is the logical file these chunks reassemble into; `chunk_index`/`chunk_total` give
+    /// the order/count; `whole_sha256` verifies the concatenation at unpack. None = a whole file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk_of: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk_index: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk_total: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub whole_sha256: Option<String>,
 }
 
 /// Archive structure type

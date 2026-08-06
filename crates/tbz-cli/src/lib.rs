@@ -435,22 +435,66 @@ fn cmd_pack(path: &str, output: &str, default_jis_level: u8, mirror_url: Option<
     // Generate signing keypair for this archive
     let (signing_key, verifying_key) = signature::generate_keypair();
 
-    // Build manifest
+    // Chunk plan: a file larger than the airlock per-block cap is split into ordered chunks
+    // (each below the cap) so every physical block still fits the airlock's bounded RAM. One flat
+    // plan drives BOTH the manifest and the write loop below, so block indices stay aligned.
+    const CHUNK_LIMIT: usize = 200 * 1024 * 1024; // below tbz-airlock's 256 MiB per-block cap
+    struct PhysBlock {
+        data: Vec<u8>,
+        path: String,
+        chunk_of: Option<String>,
+        chunk_index: Option<u32>,
+        chunk_total: Option<u32>,
+        whole_sha256: Option<String>,
+    }
+    let mut plan: Vec<PhysBlock> = Vec::new();
+    for (file_path, data) in &files {
+        if data.len() > CHUNK_LIMIT {
+            let whole = signature::sha256_hash(data);
+            let total = data.len().div_ceil(CHUNK_LIMIT) as u32;
+            println!("  chunking {} ({} bytes) → {} blocks", file_path, data.len(), total);
+            for (ci, chunk) in data.chunks(CHUNK_LIMIT).enumerate() {
+                plan.push(PhysBlock {
+                    data: chunk.to_vec(),
+                    path: file_path.clone(),
+                    chunk_of: Some(file_path.clone()),
+                    chunk_index: Some(ci as u32),
+                    chunk_total: Some(total),
+                    whole_sha256: Some(whole.clone()),
+                });
+            }
+        } else {
+            plan.push(PhysBlock {
+                data: data.clone(),
+                path: file_path.clone(),
+                chunk_of: None,
+                chunk_index: None,
+                chunk_total: None,
+                whole_sha256: None,
+            });
+        }
+    }
+
+    // Build manifest (one entry per physical block in the plan)
     let mut manifest = Manifest::new();
-    for (i, (file_path, data)) in files.iter().enumerate() {
+    for (i, pb) in plan.iter().enumerate() {
         let jis_level = jis_manifest
             .as_ref()
-            .map(|j| j.jis_level_for_path(file_path))
+            .map(|j| j.jis_level_for_path(&pb.path))
             .unwrap_or(default_jis_level);
 
         manifest.add_block(BlockEntry {
             index: (i + 1) as u32,
             block_type: "data".to_string(),
             compressed_size: 0, // filled after compression
-            uncompressed_size: data.len() as u64,
+            uncompressed_size: pb.data.len() as u64,
             jis_level,
-            description: file_path.clone(),
-            path: Some(file_path.clone()),
+            description: pb.path.clone(),
+            path: Some(pb.path.clone()),
+            chunk_of: pb.chunk_of.clone(),
+            chunk_index: pb.chunk_index,
+            chunk_total: pb.chunk_total,
+            whole_sha256: pb.whole_sha256.clone(),
         });
     }
 
@@ -465,19 +509,19 @@ fn cmd_pack(path: &str, output: &str, default_jis_level: u8, mirror_url: Option<
     writer.write_manifest(&manifest)?;
     println!("  [0] manifest ({} block entries)", manifest.blocks.len());
 
-    // Block 1..N: data
-    for (file_path, data) in &files {
+    // Block 1..N: data (one per plan entry; chunks of a large file write in order)
+    for pb in &plan {
         let jis_level = jis_manifest
             .as_ref()
-            .map(|j| j.jis_level_for_path(file_path))
+            .map(|j| j.jis_level_for_path(&pb.path))
             .unwrap_or(default_jis_level);
 
         let envelope = TibetEnvelope::new(
-            signature::sha256_hash(data),
+            signature::sha256_hash(&pb.data),
             "data",
-            mime_for_path(file_path),
+            mime_for_path(&pb.path),
             "tbz-cli",
-            &format!("Pack file: {}", file_path),
+            &format!("Pack file: {}", pb.path),
             vec!["block:0".to_string()],
         );
 
@@ -487,14 +531,18 @@ fn cmd_pack(path: &str, output: &str, default_jis_level: u8, mirror_url: Option<
             envelope
         };
 
-        writer.write_data_block(data, jis_level, &envelope)?;
-        println!(
-            "  [{}] {} ({} bytes, JIS level {})",
-            writer.block_count() - 1,
-            file_path,
-            data.len(),
-            jis_level,
-        );
+        writer.write_data_block(&pb.data, jis_level, &envelope)?;
+        match pb.chunk_index {
+            Some(ci) => println!(
+                "  [{}] {} chunk {}/{} ({} bytes, JIS level {})",
+                writer.block_count() - 1, pb.path, ci + 1,
+                pb.chunk_total.unwrap_or(0), pb.data.len(), jis_level,
+            ),
+            None => println!(
+                "  [{}] {} ({} bytes, JIS level {})",
+                writer.block_count() - 1, pb.path, pb.data.len(), jis_level,
+            ),
+        }
     }
 
     let total_blocks = writer.block_count();
@@ -604,6 +652,73 @@ fn cmd_inspect(archive: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Guard against path traversal: a manifest path must not escape output_dir via an absolute
+/// path, a root/prefix, or a `..` component. Fail-closed — the .tza consumer has a zip-slip
+/// guard, and the block CLI must too.
+fn safe_join(output_dir: &Path, rel: &str) -> anyhow::Result<std::path::PathBuf> {
+    use std::path::Component;
+    let rel_path = Path::new(rel);
+    for comp in rel_path.components() {
+        match comp {
+            Component::ParentDir =>
+                anyhow::bail!("AIRLOCK BREACH BLOCKED — path traversal (`..`) in archive path: {}", rel),
+            Component::RootDir | Component::Prefix(_) =>
+                anyhow::bail!("AIRLOCK BREACH BLOCKED — non-relative (absolute) archive path: {}", rel),
+            _ => {}
+        }
+    }
+    Ok(output_dir.join(rel_path))
+}
+
+/// Chunk-topology preflight: BEFORE any writes, prove every chunked logical file is structurally
+/// sound — the index set is EXACTLY 0..total-1 (no gaps, no duplicates), with identical chunk_total
+/// + whole_sha256 across the group. A malformed topology is an airlock breach, caught before a single
+/// byte is extracted (so a missing-last / reorder / duplicate never yields a partial file).
+fn preflight_chunk_topology(manifest: &Manifest) -> anyhow::Result<()> {
+    use std::collections::HashMap;
+    struct Group { total: u32, whole: String, indices: Vec<u32> }
+    let mut groups: HashMap<String, Group> = HashMap::new();
+    for e in &manifest.blocks {
+        let Some(cof) = e.chunk_of.as_ref() else { continue };
+        let idx = e.chunk_index
+            .ok_or_else(|| anyhow::anyhow!("AIRLOCK BREACH BLOCKED — chunk block for {} missing chunk_index", cof))?;
+        let total = e.chunk_total
+            .ok_or_else(|| anyhow::anyhow!("AIRLOCK BREACH BLOCKED — chunk block for {} missing chunk_total", cof))?;
+        let whole = e.whole_sha256.clone()
+            .ok_or_else(|| anyhow::anyhow!("AIRLOCK BREACH BLOCKED — chunk block for {} missing whole_sha256", cof))?;
+        let g = groups.entry(cof.clone())
+            .or_insert_with(|| Group { total, whole: whole.clone(), indices: Vec::new() });
+        if g.total != total {
+            anyhow::bail!("AIRLOCK BREACH BLOCKED — inconsistent chunk_total for {}", cof);
+        }
+        if g.whole != whole {
+            anyhow::bail!("AIRLOCK BREACH BLOCKED — inconsistent whole_sha256 for {}", cof);
+        }
+        g.indices.push(idx);
+    }
+    for (cof, g) in &groups {
+        if g.total == 0 {
+            anyhow::bail!("AIRLOCK BREACH BLOCKED — chunk_total 0 for {}", cof);
+        }
+        let mut seen = vec![false; g.total as usize];
+        for &i in &g.indices {
+            let slot = seen.get_mut(i as usize).ok_or_else(|| anyhow::anyhow!(
+                "AIRLOCK BREACH BLOCKED — chunk_index {} out of range 0..{} for {}", i, g.total, cof))?;
+            if *slot {
+                anyhow::bail!("AIRLOCK BREACH BLOCKED — duplicate chunk_index {} for {}", i, cof);
+            }
+            *slot = true;
+        }
+        if let Some(missing) = seen.iter().position(|s| !s) {
+            anyhow::bail!(
+                "AIRLOCK BREACH BLOCKED — missing chunk {} of {} for {} (have {})",
+                missing, g.total, cof, g.indices.len()
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Unpack a TBZ archive through the Airlock
 ///
 /// AIRLOCK GATE: Runs full verification BEFORE extraction.
@@ -640,6 +755,8 @@ fn cmd_unpack(archive: &str, output_dir: &str) -> anyhow::Result<()> {
                 if let Ok(decompressed) = block.decompress() {
                     if let Ok(manifest) = serde_json::from_slice::<Manifest>(&decompressed) {
                         verifying_key = manifest.get_verifying_key();
+                        // Chunk topology must be sound BEFORE any byte is extracted.
+                        preflight_chunk_topology(&manifest)?;
                     }
                 }
             }
@@ -690,6 +807,10 @@ fn cmd_unpack(archive: &str, output_dir: &str) -> anyhow::Result<()> {
 
     let mut block_idx = 0;
     let mut manifest: Option<Manifest> = None;
+    // Running whole-file hashers for chunked files: fold each chunk in as it lands, so reassembly is
+    // verified against whole_sha256 WITHOUT ever holding the full file in RAM (airlock stays bounded).
+    use sha2::{Digest, Sha256};
+    let mut chunk_hashers: std::collections::HashMap<String, Sha256> = std::collections::HashMap::new();
 
     while let Some(block) = reader.read_block()? {
         match block.header.block_type {
@@ -700,36 +821,91 @@ fn cmd_unpack(archive: &str, output_dir: &str) -> anyhow::Result<()> {
                 println!("  [0] Manifest parsed ({} entries)", manifest.as_ref().unwrap().blocks.len());
             }
             BlockType::Data => {
-                // Decompress into Airlock
+                // Decompress into Airlock. Each block is <= the pack-time chunk limit, so the airlock's
+                // bounded buffer holds at most one chunk — the 256 MiB cap stays meaningful.
                 let decompressed = block.decompress()?;
                 airlock.allocate(decompressed.len() as u64)?;
                 airlock.receive(&decompressed)?;
 
-                // Determine output path from manifest
-                let file_path = manifest
+                // Full manifest entry (path + any chunk metadata)
+                let entry = manifest.as_ref().and_then(|m| {
+                    m.blocks.iter().find(|e| e.index == block.header.block_index).cloned()
+                });
+                let file_path = entry
                     .as_ref()
-                    .and_then(|m| {
-                        m.blocks.iter()
-                            .find(|e| e.index == block.header.block_index)
-                            .and_then(|e| e.path.clone())
-                    })
+                    .and_then(|e| e.path.clone())
                     .unwrap_or_else(|| format!("block_{}", block.header.block_index));
 
-                // Write from Airlock to filesystem
-                let out_path = Path::new(output_dir).join(&file_path);
+                // Path-traversal guard (fail-closed) + atomic .tbzpart temp.
+                let out_path = safe_join(Path::new(output_dir), &file_path)?;
                 if let Some(parent) = out_path.parent() {
                     fs::create_dir_all(parent)?;
                 }
+                let tmp_path = {
+                    let mut t = out_path.clone().into_os_string();
+                    t.push(".tbzpart");
+                    std::path::PathBuf::from(t)
+                };
 
                 let data = airlock.release(); // returns data + wipes buffer
-                fs::write(&out_path, &data)?;
 
-                println!(
-                    "  [{}] {} ({} bytes) ✓",
-                    block.header.block_index,
-                    file_path,
-                    data.len(),
-                );
+                match entry.as_ref().and_then(|e| e.chunk_of.as_ref()) {
+                    Some(_) => {
+                        // A chunk of a large file: append in order into the temp (first chunk truncates),
+                        // fold into the running whole-file hash, verify on the last chunk, then atomically
+                        // rename the temp into place. On mismatch the temp is removed — never a partial file.
+                        use std::io::Write;
+                        let e = entry.as_ref().unwrap();
+                        let idx = e.chunk_index.unwrap_or(0);
+                        let total = e.chunk_total.unwrap_or(1);
+                        let mut f = if idx == 0 {
+                            fs::File::create(&tmp_path)?
+                        } else {
+                            fs::OpenOptions::new().append(true).open(&tmp_path)?
+                        };
+                        f.write_all(&data)?;
+                        drop(f);
+
+                        chunk_hashers
+                            .entry(file_path.clone())
+                            .or_insert_with(Sha256::new)
+                            .update(&data);
+
+                        if idx + 1 == total {
+                            let done = chunk_hashers.remove(&file_path).unwrap();
+                            let got = format!("sha256:{:x}", done.finalize());
+                            match e.whole_sha256.as_deref() {
+                                Some(expected) if expected == got => {
+                                    fs::rename(&tmp_path, &out_path)?;
+                                    println!(
+                                        "  [{}] {} reassembled from {} chunks ✓",
+                                        block.header.block_index, file_path, total
+                                    );
+                                }
+                                _ => {
+                                    let _ = fs::remove_file(&tmp_path);
+                                    anyhow::bail!(
+                                        "AIRLOCK BREACH BLOCKED — chunk reassembly hash mismatch for {} ({} chunks)",
+                                        file_path, total
+                                    );
+                                }
+                            }
+                        } else {
+                            println!(
+                                "  [{}] {} (chunk {}/{}, {} bytes) ✓",
+                                block.header.block_index, file_path, idx + 1, total, data.len()
+                            );
+                        }
+                    }
+                    None => {
+                        fs::write(&tmp_path, &data)?;
+                        fs::rename(&tmp_path, &out_path)?;
+                        println!(
+                            "  [{}] {} ({} bytes) ✓",
+                            block.header.block_index, file_path, data.len(),
+                        );
+                    }
+                }
             }
             BlockType::Nested => {
                 println!("  [{}] Nested TBZ (not yet supported)", block.header.block_index);
@@ -1201,6 +1377,11 @@ fn build_v1_archive_bytes(
             jis_level,
             description: file_path.clone(),
             path: Some(file_path.clone()),
+            // Sealed-inner path does not chunk yet (the inner v1 archive is one payload).
+            chunk_of: None,
+            chunk_index: None,
+            chunk_total: None,
+            whole_sha256: None,
         });
     }
     manifest.set_signing_key(&verifying_key);
@@ -1497,4 +1678,70 @@ fn preview_inner_manifest(
         println!();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod chunk_guard_tests {
+    use super::*;
+
+    fn chunk(idx: u32, total: u32, whole: &str, of: &str) -> BlockEntry {
+        BlockEntry {
+            index: idx + 1,
+            block_type: "data".to_string(),
+            compressed_size: 0,
+            uncompressed_size: 0,
+            jis_level: 0,
+            description: of.to_string(),
+            path: Some(of.to_string()),
+            chunk_of: Some(of.to_string()),
+            chunk_index: Some(idx),
+            chunk_total: Some(total),
+            whole_sha256: Some(whole.to_string()),
+        }
+    }
+    fn mani(entries: Vec<BlockEntry>) -> Manifest {
+        let mut m = Manifest::new();
+        for e in entries { m.add_block(e); }
+        m
+    }
+
+    #[test]
+    fn valid_two_chunk_topology_passes() {
+        let m = mani(vec![chunk(0, 2, "sha256:x", "a.wad"), chunk(1, 2, "sha256:x", "a.wad")]);
+        assert!(preflight_chunk_topology(&m).is_ok());
+    }
+    #[test]
+    fn missing_last_chunk_fails() {
+        let m = mani(vec![chunk(0, 2, "sha256:x", "a.wad")]);
+        assert!(preflight_chunk_topology(&m).is_err());
+    }
+    #[test]
+    fn duplicate_index_fails() {
+        let m = mani(vec![chunk(0, 2, "sha256:x", "a.wad"), chunk(0, 2, "sha256:x", "a.wad")]);
+        assert!(preflight_chunk_topology(&m).is_err());
+    }
+    #[test]
+    fn inconsistent_whole_sha_fails() {
+        let m = mani(vec![chunk(0, 2, "sha256:x", "a.wad"), chunk(1, 2, "sha256:y", "a.wad")]);
+        assert!(preflight_chunk_topology(&m).is_err());
+    }
+    #[test]
+    fn out_of_range_index_fails() {
+        let m = mani(vec![chunk(0, 2, "sha256:x", "a.wad"), chunk(9, 2, "sha256:x", "a.wad")]);
+        assert!(preflight_chunk_topology(&m).is_err());
+    }
+    #[test]
+    fn non_chunked_manifest_passes() {
+        let mut e = chunk(0, 1, "sha256:x", "a.wad");
+        e.chunk_of = None; e.chunk_index = None; e.chunk_total = None; e.whole_sha256 = None;
+        assert!(preflight_chunk_topology(&mani(vec![e])).is_ok());
+    }
+    #[test]
+    fn safe_join_blocks_traversal_and_absolute() {
+        let base = std::path::Path::new("/tmp/out");
+        assert!(safe_join(base, "sub/ok.wad").is_ok());
+        assert!(safe_join(base, "../escape.wad").is_err());
+        assert!(safe_join(base, "a/../../escape.wad").is_err());
+        assert!(safe_join(base, "/etc/passwd").is_err());
+    }
 }
