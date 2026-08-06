@@ -1,4 +1,4 @@
-"""Tests for tbz.v2 — confidential block encryption + SSM routing header."""
+"""Tests for tbz.v2 — v2 header reader + retired-seal fail-closed guards."""
 
 import pytest
 
@@ -92,31 +92,7 @@ class TestVersionDetection:
         assert detect_version(b"XYZ") == 0
 
 
-class TestKeyDerivation:
-
-    def test_keys_are_deterministic(self):
-        uuid_bytes = b"a" * 16
-        k1 = derive_aes_key(BOB, ALICE, uuid_bytes)
-        k2 = derive_aes_key(BOB, ALICE, uuid_bytes)
-        assert k1 == k2
-        assert len(k1) == 32
-
-    def test_different_receiver_different_key(self):
-        uuid_bytes = b"a" * 16
-        k_bob = derive_aes_key(BOB, ALICE, uuid_bytes)
-        k_eve = derive_aes_key(EVE, ALICE, uuid_bytes)
-        assert k_bob != k_eve
-
-    def test_different_archive_different_key(self):
-        k1 = derive_aes_key(BOB, ALICE, b"a" * 16)
-        k2 = derive_aes_key(BOB, ALICE, b"b" * 16)
-        assert k1 != k2
-
-    def test_invalid_key_length_raises(self):
-        with pytest.raises(TBZv2Error):
-            derive_aes_key(BOB[:16], ALICE, b"a" * 16)
-        with pytest.raises(TBZv2Error):
-            derive_aes_key(BOB, b"short", b"a" * 16)
+class TestBlockNonce:
 
     def test_block_nonce_deterministic(self):
         nonce_0 = block_nonce(b"a" * 16, 0)
@@ -126,61 +102,29 @@ class TestKeyDerivation:
         assert len(nonce_0) == 12
 
 
-class TestSealedEnvelope:
-    """End-to-end seal/unseal roundtrip."""
+class TestRetiredSeal:
+    """The v2 'confidential' seal is retired (public-input key = no confidentiality).
+    Every seal op must fail closed; the real recipient-only seal lives in
+    tibet_drop.crypto / handshake_seal.py / the Rust tbz-cli."""
 
-    def test_encrypt_decrypt_roundtrip(self):
-        env = SealedEnvelope(
-            sender_pubkey=ALICE,
-            receiver_pubkey=BOB,
-        )
-        plain = b"Bob's secret block content here. " * 10
-        cipher = env.encrypt_block(plain, 0)
-        assert cipher != plain  # encrypted
-        # Bob decrypts (same envelope params)
-        bob_env = SealedEnvelope(
-            sender_pubkey=ALICE,
-            receiver_pubkey=BOB,
-            archive_uuid=env.archive_uuid,
-        )
-        recovered = bob_env.decrypt_block(cipher, 0)
-        assert recovered == plain
+    def test_derive_aes_key_is_retired(self):
+        with pytest.raises(TBZv2Error):
+            derive_aes_key(BOB, ALICE, b"a" * 16)
 
-    def test_wrong_receiver_raises(self):
-        alice_to_bob = SealedEnvelope(
-            sender_pubkey=ALICE,
-            receiver_pubkey=BOB,
-        )
-        cipher = alice_to_bob.encrypt_block(b"for Bob's eyes only", 0)
-        # Eve tries to decrypt
-        eve_env = SealedEnvelope(
-            sender_pubkey=ALICE,
-            receiver_pubkey=EVE,
-            archive_uuid=alice_to_bob.archive_uuid,
-        )
-        with pytest.raises(TBZv2DecryptError):
-            eve_env.decrypt_block(cipher, 0)
 
-    def test_wrong_block_index_raises(self):
+    def test_encrypt_block_is_retired(self):
         env = SealedEnvelope(sender_pubkey=ALICE, receiver_pubkey=BOB)
-        cipher = env.encrypt_block(b"block zero data", 0)
-        # Try decrypting at index 1 → nonce mismatch → auth fail
-        with pytest.raises(TBZv2DecryptError):
-            env.decrypt_block(cipher, 1)
+        with pytest.raises(TBZv2Error):
+            env.encrypt_block(b"whatever", 0)
 
-    def test_tampered_cipher_raises(self):
+    def test_decrypt_block_is_retired(self):
         env = SealedEnvelope(sender_pubkey=ALICE, receiver_pubkey=BOB)
-        cipher = bytearray(env.encrypt_block(b"original content", 0))
-        cipher[5] ^= 0xFF  # flip one byte
-        with pytest.raises(TBZv2DecryptError):
-            env.decrypt_block(bytes(cipher), 0)
+        with pytest.raises(TBZv2Error):
+            env.decrypt_block(b"x" * 48, 0)
 
-    def test_envelope_header_encodes(self):
-        env = SealedEnvelope(
-            sender_pubkey=ALICE,
-            receiver_pubkey=BOB,
-            ssm_byte=0x19,
-        )
+    def test_header_still_encodes(self):
+        # Reading/writing the v2 header is fine — only the seal is retired.
+        env = SealedEnvelope(sender_pubkey=ALICE, receiver_pubkey=BOB, ssm_byte=0x19)
         hdr = env.encode_header()
         assert len(hdr) == 1 + V2_HEADER_LEN
         ver, flags, ssm = decode_v2_header(hdr)
@@ -188,22 +132,6 @@ class TestSealedEnvelope:
         assert flags & FLAG_HAS_ENCRYPTED_BLOCKS
         assert flags & FLAG_HAS_RECEIVER_IDENTITY
         assert flags & FLAG_HAS_SSM_HEADER
-
-    def test_multi_block_archive(self):
-        """Encrypt several blocks, all with same envelope, different indices."""
-        env = SealedEnvelope(sender_pubkey=ALICE, receiver_pubkey=BOB)
-        plain_blocks = [f"Block #{i} content payload here".encode() for i in range(5)]
-        ciphers = [env.encrypt_block(p, i) for i, p in enumerate(plain_blocks)]
-        # All distinct
-        assert len(set(ciphers)) == 5
-        # Bob decrypts
-        bob_env = SealedEnvelope(
-            sender_pubkey=ALICE,
-            receiver_pubkey=BOB,
-            archive_uuid=env.archive_uuid,
-        )
-        recovered = [bob_env.decrypt_block(c, i) for i, c in enumerate(ciphers)]
-        assert recovered == plain_blocks
 
 
 class TestBackwardCompat:

@@ -1,6 +1,6 @@
-"""TBZ v2 — Confidential block encryption + SSM routing header (Python POC).
+"""TBZ v2 — header READER + SSM routing (Python).
 
-Implements the wire format described in SPEC-V2.md:
+Reads the v2 wire header described in SPEC-V2.md:
 
     +-------+-------+--------+----------+--------+--------+
     | MAGIC | SSM   | v2 hdr | manifest | blocks |  ...   |
@@ -10,13 +10,15 @@ Implements the wire format described in SPEC-V2.md:
             cap-flag
             bit 0
 
-Per-block AES-256-GCM with HKDF-SHA256 key derivation from a
-receiver Ed25519 pubkey. Backward-compatible: v1 readers reject v2
-cleanly, v2 readers handle both layouts.
+Backward-compatible: v1 readers reject v2 cleanly, v2 readers handle both layouts.
 
-This module is the wire-format reference; the actual TBZ packer/unpacker
-remains the Rust CLI (`tbz` crate). When that CLI gains v2 support, it
-should agree with this module byte-for-byte.
+CONFIDENTIALITY: this module's original "confidential block encryption" POC derived the
+AES key from PUBLIC inputs (receiver_pubkey, sender_pubkey, archive_uuid), so it provided
+ZERO confidentiality — anyone with the archive header could recompute the key. That seal is
+RETIRED (fail-closed here). The canonical recipient-only seal is
+X25519-ECDH -> HKDF-SHA256 -> AES-256-GCM: see `tibet_drop.crypto` / `broker/handshake_seal.py`
+and the Rust `tbz-cli` `pack --seal` (which needs the recipient's X25519 seal PRIVATE key to open).
+This module now only READS v2 headers; sealing/opening lives with the real seal.
 """
 
 from __future__ import annotations
@@ -160,26 +162,26 @@ def _hkdf_sha256(ikm: bytes, salt: bytes, info: bytes, length: int) -> bytes:
     return okm[:length]
 
 
+_RETIRED_SEAL_NOTE = (
+    "tbz.v2 'confidential' seal is RETIRED — its AES key was derived from PUBLIC inputs "
+    "(receiver_pubkey, sender_pubkey, archive_uuid), so it gave ZERO confidentiality: anyone "
+    "with the archive header could recompute it. The canonical recipient-only seal is "
+    "X25519-ECDH -> HKDF-SHA256 -> AES-256-GCM (tibet_drop.crypto / broker/handshake_seal.py, "
+    "and the Rust tbz-cli `pack --seal --to <recipient.seal.pub>`). This module only reads v2 headers."
+)
+
+
 def derive_aes_key(
     receiver_pubkey: bytes,
     sender_pubkey: bytes,
     archive_uuid: bytes,
 ) -> bytes:
-    """Derive a 32-byte AES-256 key for a specific receiver in this archive."""
-    if len(receiver_pubkey) != 32:
-        raise TBZv2Error(
-            f"receiver Ed25519 pubkey must be 32 bytes, got {len(receiver_pubkey)}"
-        )
-    if len(sender_pubkey) != 32:
-        raise TBZv2Error(
-            f"sender Ed25519 pubkey must be 32 bytes, got {len(sender_pubkey)}"
-        )
-    return _hkdf_sha256(
-        ikm=receiver_pubkey,
-        salt=sender_pubkey + archive_uuid,
-        info=b"tbz.v2.aes256gcm.aead",
-        length=32,
-    )
+    """RETIRED — the public-input derivation was never confidential. Fail-closed.
+
+    Raises TBZv2Error pointing to the canonical X25519-ECDH seal. Kept as a symbol so old
+    imports fail loudly with a reason rather than silently producing a non-confidential key.
+    """
+    raise TBZv2Error(_RETIRED_SEAL_NOTE)
 
 
 def block_nonce(archive_uuid: bytes, block_index: int) -> bytes:
@@ -195,9 +197,12 @@ def block_nonce(archive_uuid: bytes, block_index: int) -> bytes:
 
 @dataclass
 class SealedEnvelope:
-    """A v2 sealed envelope ready to encode or decode.
+    """A v2 envelope header. `encode_header()` still reads/writes the header bytes, but the
+    encrypt/decrypt seal is RETIRED and fail-closed (see `_RETIRED_SEAL_NOTE` / `derive_aes_key`):
+    it derived the key from public inputs and was never confidential. Real recipient-only sealing
+    lives in `tibet_drop.crypto` / `handshake_seal.py` / the Rust `tbz-cli`.
 
-    Usage (seal-side):
+    Legacy usage (seal-side) — now raises TBZv2Error on encrypt_block/decrypt_block:
         env = SealedEnvelope(
             sender_pubkey=alice_pubkey,
             receiver_pubkey=bob_pubkey,

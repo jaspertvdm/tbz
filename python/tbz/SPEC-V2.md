@@ -7,6 +7,17 @@
 
 ---
 
+> **⚠ RETIRED — the "confidential" seal below is NOT confidential.** The per-receiver AES key
+> (see *Key derivation*) is derived from PUBLIC inputs only (receiver pubkey, sender pubkey,
+> archive_uuid), so anyone holding the archive header can recompute it. It provides integrity via
+> the AEAD tag, but **zero confidentiality**. This derivation is retired and fail-closed in the
+> Python module. The **canonical recipient-only seal** is X25519-ECDH → HKDF-SHA256 → AES-256-GCM
+> (needs the recipient's X25519 seal PRIVATE key): see `tibet_drop.crypto`,
+> `broker/handshake_seal.py`, and the Rust `tbz-cli pack --seal --to <recipient.seal.pub>`.
+> This spec is kept as the v2 **header** reference; the seal section is historical.
+
+---
+
 ## Three-layer hash truth
 
 ```
@@ -100,7 +111,10 @@ def detect_tbz_version(data: bytes) -> int:
 
 ---
 
-## Key derivation (per-receiver)
+## Key derivation (per-receiver) — RETIRED (see banner)
+
+> This derivation uses only PUBLIC inputs → no confidentiality. Retired / fail-closed. The real
+> seal derives the key from an X25519 ECDH shared secret (recipient private key required).
 
 Receiver-bound AES-256 key is derived from:
 
