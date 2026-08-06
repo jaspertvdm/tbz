@@ -44,6 +44,11 @@ pub const FLAG_HAS_SSM_HEADER: u8 = 0x01;
 pub const FLAG_HAS_ENCRYPTED_BLOCKS: u8 = 0x02;
 pub const FLAG_HAS_RECEIVER_IDENTITY: u8 = 0x04;
 pub const FLAG_HAS_BLOCK_COMPRESSION: u8 = 0x08;
+/// Blocks are sealed with real X25519-ECDH to the recipient's static seal key
+/// (the canonical seal — see the `seal_*` functions), NOT the retired public-input
+/// HKDF. A v2 sealed container WITHOUT this flag is refused on open (it could only
+/// be the non-confidential legacy form).
+pub const FLAG_SEAL_X25519_ECDH: u8 = 0x10;
 
 /// Declared payload class (byte 3 of v2 header, was reserved in v2.1).
 ///
@@ -488,11 +493,11 @@ mod seal_canonical_vectors {
 //
 //   [MAGIC "TBZ"            3 bytes]
 //   [V2_HEADER              4 bytes]   major(0x02) minor(0x00) flags reserved(0)
-//   [sender_pubkey         32 bytes]
-//   [receiver_pubkey       32 bytes]
-//   [archive_uuid          16 bytes]
+//   [sender_ed25519_pubkey 32 bytes]   authorship (signs the ciphertext)
+//   [ephemeral_x25519_pub  32 bytes]   sender per-message ECDH ephemeral
+//   [tpid                  16 bytes]   HKDF salt + AEAD aad
 //   [ciphertext_len  u32 BE 4 bytes]
-//   [ciphertext       N bytes      ]   AES-256-GCM(payload, block_index=0)
+//   [ciphertext       N bytes      ]   AES-256-GCM (x25519-hkdf-sha256, aad=tpid)
 //   [sender_signature      64 bytes]   Ed25519 over ciphertext
 //
 // Fixed overhead = 155 bytes. Payload = arbitrary bytes (typically a v1
@@ -537,12 +542,12 @@ pub enum V2ContainerError {
 /// a payload class, use [`write_sealed_container_with_class`].
 pub fn write_sealed_container(
     sender_signing_key: &ed25519_dalek::SigningKey,
-    receiver_pubkey: &[u8; 32],
+    recipient_x25519_seal_pub: &[u8; 32],
     payload: &[u8],
 ) -> std::result::Result<Vec<u8>, V2ContainerError> {
     write_sealed_container_with_class(
         sender_signing_key,
-        receiver_pubkey,
+        recipient_x25519_seal_pub,
         payload,
         PayloadClass::Unspecified,
     )
@@ -553,9 +558,21 @@ pub fn write_sealed_container(
 /// The declared class is carried in byte 3 of the V2 header. Unpack tooling
 /// can warn on extension/class mismatches and the iddrop layer can refuse
 /// to materialise the wrong kind of claim.
+/// Metadata of an opened v2 sealed container (real ECDH seal). Only public
+/// envelope facts — the confidential key never appears here.
+pub struct SealedContainerMeta {
+    /// Ed25519 authorship public key of the sender (whose signature verified).
+    pub sender_pubkey: [u8; 32],
+    /// Sender's per-message ephemeral X25519 public key.
+    pub ephemeral_x25519_pub: [u8; 32],
+    /// 16-byte transfer id (HKDF salt + AEAD aad).
+    pub tpid: [u8; 16],
+    pub flags: u8,
+}
+
 pub fn write_sealed_container_with_class(
     sender_signing_key: &ed25519_dalek::SigningKey,
-    receiver_pubkey: &[u8; 32],
+    recipient_x25519_seal_pub: &[u8; 32],
     payload: &[u8],
     payload_class: PayloadClass,
 ) -> std::result::Result<Vec<u8>, V2ContainerError> {
@@ -563,39 +580,37 @@ pub fn write_sealed_container_with_class(
 
     let sender_pubkey: [u8; 32] = sender_signing_key.verifying_key().to_bytes();
 
-    // Generate archive UUID
-    let mut archive_uuid = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut archive_uuid);
+    // Per-message ephemeral X25519 secret + random tpid.
+    let mut eph_secret = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut eph_secret);
+    let ephemeral_x25519_pub = seal_x25519_pub(&eph_secret);
+    let mut tpid = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut tpid);
 
-    // Build envelope and encrypt payload as block 0
-    let envelope = SealedEnvelope {
-        sender_pubkey,
-        receiver_pubkey: *receiver_pubkey,
-        archive_uuid,
-        ssm_byte: None,
-        flags: FLAG_HAS_ENCRYPTED_BLOCKS | FLAG_HAS_RECEIVER_IDENTITY,
-    };
-
-    let ciphertext = envelope.encrypt_block(payload, 0)?;
+    // ECDH -> derive -> AES-256-GCM(aad=tpid): real recipient-only confidentiality.
+    let shared = seal_ecdh(&eph_secret, recipient_x25519_seal_pub);
+    let (tk, npfx) = derive_seal_keys(&shared, &tpid);
+    let ciphertext = seal_encrypt_chunk(&tk, &npfx, 0, payload, &tpid)?;
     let cipher_len_u32: u32 = ciphertext
         .len()
         .try_into()
         .map_err(|_| V2ContainerError::LengthMismatch)?;
 
-    // Sign the ciphertext for sender authentication
+    // Ed25519 authorship over the ciphertext.
     let signature = sender_signing_key.sign(&ciphertext);
     let sig_bytes: [u8; 64] = signature.to_bytes();
 
-    // Assemble: MAGIC + V2_HDR (with payload_class) + sender_pk + receiver_pk
-    //         + uuid + len + cipher + sig
+    // Wire: MAGIC + V2_HDR(class) + sender_ed_pub(32) + ephemeral_x25519_pub(32)
+    //     + tpid(16) + cipher_len(4) + ciphertext + sender_sig(64)
+    let flags = FLAG_HAS_ENCRYPTED_BLOCKS | FLAG_HAS_RECEIVER_IDENTITY | FLAG_SEAL_X25519_ECDH;
     let mut out: Vec<u8> = Vec::with_capacity(
         V2_CONTAINER_PREFIX_LEN + ciphertext.len() + V2_CONTAINER_SIG_LEN,
     );
     out.extend_from_slice(&crate::MAGIC);
-    out.extend_from_slice(&encode_v2_header_with_class(envelope.flags, None, payload_class));
+    out.extend_from_slice(&encode_v2_header_with_class(flags, None, payload_class));
     out.extend_from_slice(&sender_pubkey);
-    out.extend_from_slice(receiver_pubkey);
-    out.extend_from_slice(&archive_uuid);
+    out.extend_from_slice(&ephemeral_x25519_pub);
+    out.extend_from_slice(&tpid);
     out.extend_from_slice(&cipher_len_u32.to_be_bytes());
     out.extend_from_slice(&ciphertext);
     out.extend_from_slice(&sig_bytes);
@@ -611,9 +626,9 @@ pub fn write_sealed_container_with_class(
 /// `PayloadClass`.
 pub fn read_sealed_container(
     container: &[u8],
-    receiver_signing_key: &ed25519_dalek::SigningKey,
-) -> std::result::Result<(SealedEnvelope, Vec<u8>), V2ContainerError> {
-    let (env, plain, _class) = read_sealed_container_full(container, receiver_signing_key)?;
+    recipient_x25519_seal_priv: &[u8; 32],
+) -> std::result::Result<(SealedContainerMeta, Vec<u8>), V2ContainerError> {
+    let (env, plain, _class) = read_sealed_container_full(container, recipient_x25519_seal_priv)?;
     Ok((env, plain))
 }
 
@@ -621,8 +636,8 @@ pub fn read_sealed_container(
 /// payload class as well as the inner payload.
 pub fn read_sealed_container_full(
     container: &[u8],
-    receiver_signing_key: &ed25519_dalek::SigningKey,
-) -> std::result::Result<(SealedEnvelope, Vec<u8>, PayloadClass), V2ContainerError> {
+    recipient_x25519_seal_priv: &[u8; 32],
+) -> std::result::Result<(SealedContainerMeta, Vec<u8>, PayloadClass), V2ContainerError> {
     use ed25519_dalek::{Verifier, VerifyingKey};
 
     if container.len() < V2_CONTAINER_PREFIX_LEN + V2_CONTAINER_SIG_LEN {
@@ -632,12 +647,17 @@ pub fn read_sealed_container_full(
         return Err(V2ContainerError::BadMagic);
     }
 
-    // V2 header (including declared payload class in byte 3)
+    // V2 header (declared payload class in byte 3).
     let v2_hdr = &container[3..3 + V2_HEADER_LEN];
     let (version, flags, _ssm, payload_class) =
         decode_v2_header_full(v2_hdr).map_err(V2ContainerError::Envelope)?;
     if version != V2_VERSION_MAJOR {
         return Err(V2ContainerError::NotV2);
+    }
+    // Refuse anything not sealed with the real ECDH seal — the legacy public-input
+    // form is not confidential and must not be silently accepted.
+    if flags & FLAG_SEAL_X25519_ECDH == 0 {
+        return Err(V2ContainerError::DecryptFailed);
     }
 
     let mut off = 3 + V2_HEADER_LEN;
@@ -645,11 +665,11 @@ pub fn read_sealed_container_full(
         .try_into()
         .map_err(|_| V2ContainerError::TooShort)?;
     off += 32;
-    let receiver_pubkey: [u8; 32] = container[off..off + 32]
+    let ephemeral_x25519_pub: [u8; 32] = container[off..off + 32]
         .try_into()
         .map_err(|_| V2ContainerError::TooShort)?;
     off += 32;
-    let archive_uuid: [u8; 16] = container[off..off + 16]
+    let tpid: [u8; 16] = container[off..off + 16]
         .try_into()
         .map_err(|_| V2ContainerError::TooShort)?;
     off += 16;
@@ -668,7 +688,7 @@ pub fn read_sealed_container_full(
         .try_into()
         .map_err(|_| V2ContainerError::TooShort)?;
 
-    // Verify sender signature on ciphertext
+    // Authorship: verify the sender Ed25519 signature over the ciphertext first.
     let sender_vk = VerifyingKey::from_bytes(&sender_pubkey)
         .map_err(|_| V2ContainerError::BadSignature)?;
     let signature = ed25519_dalek::Signature::from_bytes(&sig_bytes);
@@ -676,28 +696,20 @@ pub fn read_sealed_container_full(
         .verify(ciphertext, &signature)
         .map_err(|_| V2ContainerError::BadSignature)?;
 
-    // Confirm we're the receiver
-    let our_pubkey: [u8; 32] = receiver_signing_key.verifying_key().to_bytes();
-    let envelope = SealedEnvelope {
-        sender_pubkey,
-        receiver_pubkey,
-        archive_uuid,
-        ssm_byte: None,
-        flags,
-    };
-
-    if our_pubkey != receiver_pubkey {
-        // Try decryption anyway — it will fail with the wrong key, but the
-        // sealed envelope still carries the addressed recipient. Returning
-        // BadSignature would be incorrect; the right error is DecryptFailed.
-        return Err(V2ContainerError::DecryptFailed);
-    }
-
-    let plain = envelope
-        .decrypt_block(ciphertext, 0)
+    // Open: ECDH my static seal-priv x sender ephemeral pub -> derive -> AEAD.
+    // The AEAD tag fails if we are not the intended recipient.
+    let shared = seal_ecdh(recipient_x25519_seal_priv, &ephemeral_x25519_pub);
+    let (tk, npfx) = derive_seal_keys(&shared, &tpid);
+    let plain = seal_decrypt_chunk(&tk, &npfx, 0, ciphertext, &tpid)
         .map_err(|_| V2ContainerError::DecryptFailed)?;
 
-    Ok((envelope, plain, payload_class))
+    let meta = SealedContainerMeta {
+        sender_pubkey,
+        ephemeral_x25519_pub,
+        tpid,
+        flags,
+    };
+    Ok((meta, plain, payload_class))
 }
 
 #[cfg(test)]
@@ -873,15 +885,28 @@ mod tests {
         SigningKey::generate(&mut OsRng)
     }
 
+    /// A recipient's X25519 seal keypair (the dual-card seal key). Sealed
+    /// containers are addressed to `seal_pub` and opened with `seal_priv`.
+    struct SealPeer {
+        seal_priv: [u8; 32],
+        seal_pub: [u8; 32],
+    }
+    fn make_seal_peer() -> SealPeer {
+        let mut seal_priv = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut seal_priv);
+        let seal_pub = seal_x25519_pub(&seal_priv);
+        SealPeer { seal_priv, seal_pub }
+    }
+
     #[test]
     fn container_roundtrip_smallpayload() {
         let sender = make_signing_key();
-        let receiver = make_signing_key();
+        let receiver = make_seal_peer();
         let payload = b"hello v2 sealed container, this is the inner payload bytes";
 
         let container = write_sealed_container(
             &sender,
-            &receiver.verifying_key().to_bytes(),
+            &receiver.seal_pub,
             payload,
         )
         .expect("write_sealed_container should succeed");
@@ -891,51 +916,50 @@ mod tests {
         assert_eq!(&container[0..3], &crate::MAGIC);
 
         let (env, recovered) =
-            read_sealed_container(&container, &receiver).expect("read should succeed");
+            read_sealed_container(&container, &receiver.seal_priv).expect("read should succeed");
         assert_eq!(recovered, payload);
         assert_eq!(env.sender_pubkey, sender.verifying_key().to_bytes());
-        assert_eq!(env.receiver_pubkey, receiver.verifying_key().to_bytes());
+        assert!(env.flags & FLAG_SEAL_X25519_ECDH != 0);
     }
 
     #[test]
     fn container_roundtrip_largepayload() {
         let sender = make_signing_key();
-        let receiver = make_signing_key();
+        let receiver = make_seal_peer();
         let payload: Vec<u8> = (0..100_000).map(|i| (i & 0xff) as u8).collect();
 
         let container =
-            write_sealed_container(&sender, &receiver.verifying_key().to_bytes(), &payload)
+            write_sealed_container(&sender, &receiver.seal_pub, &payload)
                 .unwrap();
-        let (_, recovered) = read_sealed_container(&container, &receiver).unwrap();
+        let (_, recovered) = read_sealed_container(&container, &receiver.seal_priv).unwrap();
         assert_eq!(recovered, payload);
     }
 
     #[test]
     fn container_wrong_receiver_fails() {
         let sender = make_signing_key();
-        let bob = make_signing_key();
-        let eve = make_signing_key();
+        let bob = make_seal_peer();
+        let eve = make_seal_peer();
         let payload = b"top secret";
 
-        let container =
-            write_sealed_container(&sender, &bob.verifying_key().to_bytes(), payload).unwrap();
-        // Eve tries with her key — must fail
-        let result = read_sealed_container(&container, &eve);
+        let container = write_sealed_container(&sender, &bob.seal_pub, payload).unwrap();
+        // Eve tries with her seal key — the AEAD tag must fail.
+        let result = read_sealed_container(&container, &eve.seal_priv);
         assert!(matches!(result, Err(V2ContainerError::DecryptFailed)));
     }
 
     #[test]
     fn container_tampered_ciphertext_fails() {
         let sender = make_signing_key();
-        let receiver = make_signing_key();
+        let receiver = make_seal_peer();
         let payload = b"original payload bytes";
 
         let mut container =
-            write_sealed_container(&sender, &receiver.verifying_key().to_bytes(), payload).unwrap();
+            write_sealed_container(&sender, &receiver.seal_pub, payload).unwrap();
         // Flip a bit deep in the ciphertext region
         let mid = V2_CONTAINER_PREFIX_LEN + 5;
         container[mid] ^= 0xFF;
-        let result = read_sealed_container(&container, &receiver);
+        let result = read_sealed_container(&container, &receiver.seal_priv);
         // BadSignature OR DecryptFailed both acceptable — tampering detected.
         assert!(matches!(
             result,
@@ -946,29 +970,29 @@ mod tests {
     #[test]
     fn container_tampered_signature_fails() {
         let sender = make_signing_key();
-        let receiver = make_signing_key();
+        let receiver = make_seal_peer();
         let payload = b"original payload bytes";
 
         let mut container =
-            write_sealed_container(&sender, &receiver.verifying_key().to_bytes(), payload).unwrap();
+            write_sealed_container(&sender, &receiver.seal_pub, payload).unwrap();
         // Flip the last byte (= signature trailer)
         let last = container.len() - 1;
         container[last] ^= 0xFF;
-        let result = read_sealed_container(&container, &receiver);
+        let result = read_sealed_container(&container, &receiver.seal_priv);
         assert!(matches!(result, Err(V2ContainerError::BadSignature)));
     }
 
     #[test]
     fn container_truncated_fails() {
         let sender = make_signing_key();
-        let receiver = make_signing_key();
+        let receiver = make_seal_peer();
         let payload = b"some payload";
 
         let container =
-            write_sealed_container(&sender, &receiver.verifying_key().to_bytes(), payload).unwrap();
+            write_sealed_container(&sender, &receiver.seal_pub, payload).unwrap();
         // Truncate
         let truncated = &container[..container.len() / 2];
-        let result = read_sealed_container(truncated, &receiver);
+        let result = read_sealed_container(truncated, &receiver.seal_priv);
         assert!(matches!(
             result,
             Err(V2ContainerError::TooShort) | Err(V2ContainerError::LengthMismatch)
@@ -978,11 +1002,11 @@ mod tests {
     #[test]
     fn container_overhead_matches_constants() {
         let sender = make_signing_key();
-        let receiver = make_signing_key();
+        let receiver = make_seal_peer();
         let payload = vec![0u8; 1000];
 
         let container =
-            write_sealed_container(&sender, &receiver.verifying_key().to_bytes(), &payload)
+            write_sealed_container(&sender, &receiver.seal_pub, &payload)
                 .unwrap();
         // AES-GCM adds 16 byte tag → ciphertext = payload.len() + 16
         // Total = V2_CONTAINER_PREFIX_LEN + (payload + 16) + V2_CONTAINER_SIG_LEN
@@ -1005,19 +1029,19 @@ mod tests {
             PayloadClass::Receipt,
         ] {
             let sender = make_signing_key();
-            let receiver = make_signing_key();
+            let receiver = make_seal_peer();
             let payload = b"payload-class-test";
 
             let container = write_sealed_container_with_class(
                 &sender,
-                &receiver.verifying_key().to_bytes(),
+                &receiver.seal_pub,
                 payload,
                 cls,
             )
             .unwrap();
 
             let (_env, recovered, decoded_cls) =
-                read_sealed_container_full(&container, &receiver).unwrap();
+                read_sealed_container_full(&container, &receiver.seal_priv).unwrap();
             assert_eq!(recovered, payload, "payload roundtrip failed for {:?}", cls);
             assert_eq!(decoded_cls, cls, "class roundtrip failed for {:?}", cls);
         }
@@ -1028,17 +1052,17 @@ mod tests {
         // A v2.1 archive (= class byte was always 0 / Unspecified) must
         // still decode under v2.2 readers.
         let sender = make_signing_key();
-        let receiver = make_signing_key();
+        let receiver = make_seal_peer();
         let container = write_sealed_container(
             &sender,
-            &receiver.verifying_key().to_bytes(),
+            &receiver.seal_pub,
             b"legacy v2.1",
         )
         .unwrap();
         // Reserved byte (= byte 3 of v2 header = byte 6 of container) must be 0
         assert_eq!(container[6], 0);
         let (_env, recovered, cls) =
-            read_sealed_container_full(&container, &receiver).unwrap();
+            read_sealed_container_full(&container, &receiver.seal_priv).unwrap();
         assert_eq!(recovered, b"legacy v2.1");
         assert_eq!(cls, PayloadClass::Unspecified);
     }

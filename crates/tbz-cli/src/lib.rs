@@ -195,14 +195,16 @@ enum Commands {
         /// JIS authorization level for all blocks (default: 0)
         #[arg(long, default_value = "0")]
         jis_level: u8,
-        /// Seal the archive (= v2): wrap in an AES-256-GCM envelope.
+        /// Seal the archive (= v2): recipient-only X25519-ECDH + AES-256-GCM.
+        /// Only the holder of the recipient's seal private key can open it.
         #[arg(long)]
         seal: bool,
-        /// Receiver's Ed25519 public key (hex, 64 chars). Required with --seal.
-        #[arg(long, value_name = "PUBKEY_HEX")]
+        /// Recipient's X25519 SEAL public key (hex, 64 chars) — their <name>.seal.pub.
+        /// Required with --seal. NOT the Ed25519 verify key.
+        #[arg(long, value_name = "SEAL_PUBKEY_HEX")]
         to: Option<String>,
-        /// Sender's Ed25519 private key file (hex). Optional; ephemeral if absent.
-        #[arg(long, value_name = "PRIVKEY_PATH")]
+        /// Sender's Ed25519 authorship (signing) key file (hex) — signs the sealed body.
+        #[arg(long, value_name = "SIGN_KEY_PATH")]
         from: Option<String>,
         /// Declared payload class for v2 envelopes (= L2 semantic typing).
         /// Values: identity | code | document | command | receipt.
@@ -222,8 +224,9 @@ enum Commands {
         /// Output directory
         #[arg(short, long, default_value = ".")]
         output: String,
-        /// Receiver's Ed25519 private key file (hex). Required for v2 sealed archives.
-        #[arg(long = "as", value_name = "PRIVKEY_PATH")]
+        /// Recipient's X25519 SEAL private key file (hex) — your <name>.seal.priv.
+        /// Required for v2 sealed archives.
+        #[arg(long = "as", value_name = "SEAL_PRIVKEY_PATH")]
         as_key: Option<String>,
         /// Skip the inner-manifest preview shown before extraction.
         #[arg(long)]
@@ -1055,6 +1058,13 @@ fn read_signing_key_from_file(path: &str) -> anyhow::Result<ed25519_dalek::Signi
     Ok(ed25519_dalek::SigningKey::from_bytes(&bytes))
 }
 
+/// Read a 32-byte X25519 seal private key (hex) from a file (the `--as` key).
+fn read_seal_priv_from_file(path: &str) -> anyhow::Result<[u8; 32]> {
+    let raw = fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("cannot read seal key file {}: {}", path, e))?;
+    hex_decode_32(&raw)
+}
+
 fn chrono_now() -> String {
     use std::time::SystemTime;
     let duration = SystemTime::now()
@@ -1070,33 +1080,47 @@ fn chrono_now() -> String {
 fn cmd_keygen(output: &str) -> anyhow::Result<()> {
     use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
+    use rand::RngCore;
 
+    // Dual-card identity (matches the box's certs/<aint>.key + certs/<aint>.seal.key):
+    //   Ed25519  = authorship / signing  (--from)
+    //   X25519   = recipient seal key    (--to = seal.pub, --as = seal.priv)
     let signing_key = SigningKey::generate(&mut OsRng);
     let verifying_key = signing_key.verifying_key();
+    let mut seal_priv = [0u8; 32];
+    OsRng.fill_bytes(&mut seal_priv);
+    let seal_pub = tbz_core::v2::seal_x25519_pub(&seal_priv);
 
     let priv_path = format!("{}.priv", output);
     let pub_path = format!("{}.pub", output);
+    let seal_priv_path = format!("{}.seal.priv", output);
+    let seal_pub_path = format!("{}.seal.pub", output);
 
-    // Write private key (hex) with 0600 permissions
     let priv_hex = hex_encode(&signing_key.to_bytes());
     fs::write(&priv_path, &priv_hex)?;
+    let seal_priv_hex = hex_encode(&seal_priv);
+    fs::write(&seal_priv_path, &seal_priv_hex)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let perms = fs::Permissions::from_mode(0o600);
-        fs::set_permissions(&priv_path, perms)?;
+        fs::set_permissions(&priv_path, fs::Permissions::from_mode(0o600))?;
+        fs::set_permissions(&seal_priv_path, fs::Permissions::from_mode(0o600))?;
     }
-
     let pub_hex = hex_encode(&verifying_key.to_bytes());
     fs::write(&pub_path, &pub_hex)?;
+    let seal_pub_hex = hex_encode(&seal_pub);
+    fs::write(&seal_pub_path, &seal_pub_hex)?;
 
-    println!("TBZ keygen: Ed25519 keypair generated\n");
-    println!("  Private: {} (mode 0600)", priv_path);
-    println!("  Public:  {}", pub_path);
-    println!("\n  Pubkey (share this): {}", pub_hex);
+    println!("TBZ keygen: dual-card (Ed25519 authorship + X25519 seal)\n");
+    println!("  Authorship private (--from): {} (mode 0600)", priv_path);
+    println!("  Authorship public:           {}", pub_path);
+    println!("  Seal private       (--as):   {} (mode 0600)", seal_priv_path);
+    println!("  Seal public  (--to / share): {}", seal_pub_path);
+    println!("\n  Authorship pubkey: {}", pub_hex);
+    println!("  Seal pubkey (share to receive sealed carriers): {}", seal_pub_hex);
     println!("\n  Use with:");
-    println!("    tibet-zip pack <dir> -o sealed.tza --seal --to {} --from {}", pub_hex, priv_path);
-    println!("    tibet-zip unpack sealed.tza -o out/ --as {}", priv_path);
+    println!("    tibet-zip pack <dir> -o sealed.tza --seal --to <recipient.seal.pub> --from {}", priv_path);
+    println!("    tibet-zip unpack sealed.tza -o out/ --as {}", seal_priv_path);
     Ok(())
 }
 
@@ -1233,10 +1257,10 @@ fn cmd_unpack_dispatch(
     if version == 2 {
         let priv_path = as_key.ok_or_else(|| anyhow::anyhow!(
             "{} is a v2 sealed archive — pass --as <privkey-path> to decrypt", archive))?;
-        let receiver_key = read_signing_key_from_file(priv_path)?;
+        let receiver_seal_priv = read_seal_priv_from_file(priv_path)?;
         println!("TBZ unpack (v2 sealed): {} → {}", archive, output_dir);
         let container = fs::read(archive)?;
-        let result = v2::read_sealed_container_full(&container, &receiver_key);
+        let result = v2::read_sealed_container_full(&container, &receiver_seal_priv);
         let (env, plain, payload_class) = match result {
             Ok(t) => t,
             Err(e) => {
@@ -1255,7 +1279,7 @@ fn cmd_unpack_dispatch(
             }
         };
         println!("  Sender:   {}", hex_encode(&env.sender_pubkey));
-        println!("  Receiver: {} ✓", hex_encode(&env.receiver_pubkey));
+        println!("  Opened with our X25519 seal key ✓ (ephemeral {})", hex_encode(&env.ephemeral_x25519_pub));
         println!("  Declared payload class: {}", payload_class.label());
         println!("  Inner v1 archive: {} bytes\n", plain.len());
 
@@ -1287,8 +1311,8 @@ fn cmd_unpack_dispatch(
         let outcome = if result.is_ok() { "success" } else { "extract-failed" };
         emit_unseal_audit(
             &hex_encode(&env.sender_pubkey),
-            &hex_encode(&env.receiver_pubkey),
-            &hex_encode(&env.archive_uuid),
+            &hex_encode(&env.ephemeral_x25519_pub),
+            &hex_encode(&env.tpid),
             payload_class.label(),
             plain.len(),
             outcome,

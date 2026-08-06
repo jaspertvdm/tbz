@@ -56,7 +56,7 @@ fn v2_full_roundtrip_with_correct_receiver() {
         bob_key.to_str().unwrap(),
     ]);
     assert!(ok, "keygen failed: {}", err);
-    let bob_pub = std::fs::read_to_string(workdir.join("bob.pub")).unwrap();
+    let bob_pub = std::fs::read_to_string(workdir.join("bob.seal.pub")).unwrap();
     let bob_pub = bob_pub.trim();
     assert_eq!(bob_pub.len(), 64, "pubkey should be 64 hex chars");
 
@@ -91,7 +91,7 @@ fn v2_full_roundtrip_with_correct_receiver() {
     // 5. Unpack --as bob.priv (correct receiver)
     let out_dir = workdir.join("out");
     std::fs::create_dir_all(&out_dir).unwrap();
-    let bob_priv = workdir.join("bob.priv");
+    let bob_priv = workdir.join("bob.seal.priv");
     let (ok, _, err) = run(&[
         "unpack",
         sealed.to_str().unwrap(),
@@ -125,7 +125,7 @@ fn v2_wrong_receiver_is_rejected() {
     let eve_key = workdir.join("eve");
     let _ = run(&["keygen", "-o", eve_key.to_str().unwrap()]);
 
-    let bob_pub = std::fs::read_to_string(workdir.join("bob.pub")).unwrap();
+    let bob_pub = std::fs::read_to_string(workdir.join("bob.seal.pub")).unwrap();
     let bob_pub = bob_pub.trim();
 
     let sealed = workdir.join("sealed.tza");
@@ -143,7 +143,7 @@ fn v2_wrong_receiver_is_rejected() {
     // Eve tries with HER private key — should fail
     let out_dir = workdir.join("out");
     std::fs::create_dir_all(&out_dir).unwrap();
-    let eve_priv = workdir.join("eve.priv");
+    let eve_priv = workdir.join("eve.seal.priv");
     let (ok, _, err) = run(&[
         "unpack",
         sealed.to_str().unwrap(),
@@ -175,7 +175,7 @@ fn v2_missing_as_key_is_rejected() {
 
     let bob_key = workdir.join("bob");
     let _ = run(&["keygen", "-o", bob_key.to_str().unwrap()]);
-    let bob_pub = std::fs::read_to_string(workdir.join("bob.pub")).unwrap();
+    let bob_pub = std::fs::read_to_string(workdir.join("bob.seal.pub")).unwrap();
     let bob_pub = bob_pub.trim();
 
     let sealed = workdir.join("sealed.tza");
