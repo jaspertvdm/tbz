@@ -2,6 +2,36 @@
 
 All notable changes to TBZ (TIBET-zip) are documented here.
 
+## [2.3.0] — 2026-08-06
+
+### Fixed — the v2 "confidential" seal is now actually confidential
+
+The v2 sealed container derived its AES key from PUBLIC inputs
+(`derive_aes_key(receiver_pubkey, sender_pubkey, archive_uuid)`), so anyone
+holding the archive header could recompute the key — **zero confidentiality**.
+
+- **Real recipient-only seal (X25519-ECDH).** `pack --seal` / `unpack --as` now
+  use ephemeral X25519 → recipient static X25519 seal key → HKDF-SHA256 →
+  AES-256-GCM (aad=tpid), converged byte-for-byte on the box's
+  `broker/handshake_seal.py` / `tibet_drop.crypto`. Only the recipient's X25519
+  seal **private** key opens it. Legacy public-HKDF containers are refused.
+- **Dual-card keygen.** `keygen` now mints Ed25519 authorship (`.priv`/`.pub`)
+  **and** X25519 seal (`.seal.priv`/`.seal.pub`). `--to` = recipient `.seal.pub`,
+  `--as` = recipient `.seal.priv`, `--from` = Ed25519 authorship key.
+- **Python `tbz.v2` seal retired** — reader only; `derive_aes_key`/`encrypt_block`/
+  `decrypt_block` fail closed pointing to the canonical seal.
+
+### Added — large-file chunking (verified carrier)
+
+- A file larger than the airlock's 256 MiB per-block cap is split at pack time
+  into ordered ≤200 MiB chunks (`BlockEntry` += `chunk_of`/`chunk_index`/
+  `chunk_total`/`whole_sha256`, serde-skip = backward-compat).
+- Unpack proves chunk topology (no gap/dupe/reorder) **before** any write,
+  reassembles via a `.tbzpart` temp folded into a running whole-file SHA-256
+  (never the full file in RAM), verifies `whole_sha256`, then atomically renames.
+  `safe_join` blocks `..`/absolute path traversal. Proven: 220 MiB roundtrip →
+  identical SHA-256.
+
 ## [2.2.0] — 2026-05-17
 
 ### Added — L2 semantic typing + audit trail (iddrop foundation)
