@@ -24,3 +24,5 @@ thiserror.workspace = true
 # v2 — confidential block encryption (AES-256-GCM + HKDF-SHA256)
 aes-gcm.workspace = true
 hkdf.workspace = true
+# real recipient-only seal (X25519 ECDH) — converges on broker/handshake_seal.py
+x25519-dalek.workspace = true

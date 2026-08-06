@@ -27,6 +27,8 @@ rand = "0.8"
 # v2 confidential block encryption
 aes-gcm = "0.10"
 hkdf = "0.12"
+# real recipient-only seal (X25519 ECDH) — converges tbz on broker/handshake_seal.py
+x25519-dalek = { version = "2", features = ["static_secrets"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

@@ -341,6 +341,146 @@ impl SealedEnvelope {
 }
 
 // =============================================================================
+// CANONICAL SEALED CARRIER — x25519-hkdf-sha256-aes256gcm
+// Converges tbz on broker/handshake_seal.py (the seal cmail / lane / handshake
+// already use). Byte-for-byte per tbz-canonical-stage/CANONICAL-SEAL-SPEC.md.
+// Confidentiality is REAL here: `shared` needs the recipient's X25519 private
+// key. This is the honest replacement for `derive_aes_key` (public-input HKDF,
+// zero confidentiality — kept only until the seal path is fully rewired).
+// =============================================================================
+
+/// HKDF info label — MUST equal `tibet_drop.crypto.INFO_LABEL`.
+pub const SEAL_INFO_LABEL: &[u8] = b"AInternet-Airdrop-Tunnel-v1";
+
+/// X25519 public key for a raw 32-byte secret (RFC 7748).
+pub fn seal_x25519_pub(secret: &[u8; 32]) -> [u8; 32] {
+    let s = x25519_dalek::StaticSecret::from(*secret);
+    *x25519_dalek::PublicKey::from(&s).as_bytes()
+}
+
+/// X25519 ECDH: our secret × their public → 32-byte shared secret.
+pub fn seal_ecdh(my_secret: &[u8; 32], their_pub: &[u8; 32]) -> [u8; 32] {
+    let s = x25519_dalek::StaticSecret::from(*my_secret);
+    let p = x25519_dalek::PublicKey::from(*their_pub);
+    *s.diffie_hellman(&p).as_bytes()
+}
+
+/// Derive (AES-256 key, 8-byte nonce prefix) from an ECDH shared secret + tpid salt.
+/// Two HKDF-SHA256 expands over the same PRK — matches `handshake_seal._derive`.
+pub fn derive_seal_keys(shared: &[u8; 32], tpid: &[u8]) -> ([u8; 32], [u8; 8]) {
+    let hk = Hkdf::<Sha256>::new(Some(tpid), shared);
+    let mut tk = [0u8; 32];
+    hk.expand(SEAL_INFO_LABEL, &mut tk).expect("hkdf tk (32) cannot fail");
+    let mut info1 = SEAL_INFO_LABEL.to_vec();
+    info1.push(0x01);
+    let mut npfx = [0u8; 8];
+    hk.expand(&info1, &mut npfx).expect("hkdf npfx (8) cannot fail");
+    (tk, npfx)
+}
+
+/// 12-byte AEAD nonce = `nonce_prefix(8) || u32_be(chunk_index)(4)` (Phase-0 §3.4 NORMATIVE).
+pub fn seal_nonce(npfx: &[u8; 8], chunk_index: u32) -> [u8; 12] {
+    let mut n = [0u8; 12];
+    n[..8].copy_from_slice(npfx);
+    n[8..].copy_from_slice(&chunk_index.to_be_bytes());
+    n
+}
+
+/// AES-256-GCM encrypt one chunk with `aad` — matches `tibet_drop.crypto.encrypt_chunk`.
+pub fn seal_encrypt_chunk(
+    tk: &[u8; 32],
+    npfx: &[u8; 8],
+    chunk_index: u32,
+    plaintext: &[u8],
+    aad: &[u8],
+) -> Result<Vec<u8>> {
+    let cipher = Aes256Gcm::new(AesKey::<Aes256Gcm>::from_slice(tk));
+    let nb = seal_nonce(npfx, chunk_index);
+    cipher
+        .encrypt(Nonce::from_slice(&nb), aes_gcm::aead::Payload { msg: plaintext, aad })
+        .map_err(|_| Tbzv2Error::AeadAuthFailed)
+}
+
+/// AES-256-GCM decrypt one chunk with `aad`. AEAD tag fails ⇒ wrong recipient / tamper.
+pub fn seal_decrypt_chunk(
+    tk: &[u8; 32],
+    npfx: &[u8; 8],
+    chunk_index: u32,
+    ciphertext: &[u8],
+    aad: &[u8],
+) -> Result<Vec<u8>> {
+    let cipher = Aes256Gcm::new(AesKey::<Aes256Gcm>::from_slice(tk));
+    let nb = seal_nonce(npfx, chunk_index);
+    cipher
+        .decrypt(Nonce::from_slice(&nb), aes_gcm::aead::Payload { msg: ciphertext, aad })
+        .map_err(|_| Tbzv2Error::AeadAuthFailed)
+}
+
+#[cfg(test)]
+mod seal_canonical_vectors {
+    use super::*;
+
+    fn hex(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{:02x}", x)).collect()
+    }
+
+    /// Golden vector from the live Python handshake_seal / tibet_drop.crypto.
+    /// See tbz-canonical-stage/CANONICAL-SEAL-SPEC.md. Green = one language.
+    #[test]
+    fn matches_python_golden_vector() {
+        let recip_priv = [0x11u8; 32];
+        let eph_priv = [0x22u8; 32];
+        let tpid: Vec<u8> = (0u8..16).collect();
+        let plaintext = b"the cage is the product";
+
+        let recip_pub = seal_x25519_pub(&recip_priv);
+        assert_eq!(hex(&recip_pub), "7b4e909bbe7ffe44c465a220037d608ee35897d31ef972f07f74892cb0f73f13");
+        let eph_pub = seal_x25519_pub(&eph_priv);
+        assert_eq!(hex(&eph_pub), "0faa684ed28867b97f4a6a2dee5df8ce974e76b7018e3f22a1c4cf2678570f20");
+
+        // sender: ephemeral × recipient-static
+        let shared = seal_ecdh(&eph_priv, &recip_pub);
+        assert_eq!(hex(&shared), "9e004098efc091d4ec2663b4e9f5cfd4d7064571690b4bea97ab146ab9f35056");
+
+        let (tk, npfx) = derive_seal_keys(&shared, &tpid);
+        assert_eq!(hex(&tk), "1c1218228e8592aff0b90e12172ef48359c5a57ce3e067bf285fa573f2e6e683");
+        assert_eq!(hex(&npfx), "3163838f4d15e0c4");
+        assert_eq!(hex(&seal_nonce(&npfx, 0)), "3163838f4d15e0c400000000");
+
+        let sealed = seal_encrypt_chunk(&tk, &npfx, 0, plaintext, &tpid).unwrap();
+        assert_eq!(
+            hex(&sealed),
+            "3f787290719f552bbb230d5e4cf71678e2b117aa151c04aa5c365df1a394353611321b987516e6"
+        );
+
+        // recipient: static × ephemeral → same shared → round-trips
+        let shared_r = seal_ecdh(&recip_priv, &eph_pub);
+        assert_eq!(shared_r, shared);
+        let (tk_r, npfx_r) = derive_seal_keys(&shared_r, &tpid);
+        let back = seal_decrypt_chunk(&tk_r, &npfx_r, 0, &sealed, &tpid).unwrap();
+        assert_eq!(back, plaintext);
+    }
+
+    /// A third party (wrong recipient key) cannot open the sealed chunk.
+    #[test]
+    fn wrong_recipient_cannot_open() {
+        let recip_priv = [0x11u8; 32];
+        let eve_priv = [0x99u8; 32];
+        let eph_priv = [0x22u8; 32];
+        let tpid: Vec<u8> = (0u8..16).collect();
+        let recip_pub = seal_x25519_pub(&recip_priv);
+        let eph_pub = seal_x25519_pub(&eph_priv);
+        let shared = seal_ecdh(&eph_priv, &recip_pub);
+        let (tk, npfx) = derive_seal_keys(&shared, &tpid);
+        let sealed = seal_encrypt_chunk(&tk, &npfx, 0, b"secret", &tpid).unwrap();
+        // Eve derives her (wrong) shared secret and must fail the AEAD tag.
+        let eve_shared = seal_ecdh(&eve_priv, &eph_pub);
+        let (etk, enpfx) = derive_seal_keys(&eve_shared, &tpid);
+        assert!(seal_decrypt_chunk(&etk, &enpfx, 0, &sealed, &tpid).is_err());
+    }
+}
+
+// =============================================================================
 // V2 SEALED CONTAINER (single-block wrap-of-payload)
 // =============================================================================
 //
