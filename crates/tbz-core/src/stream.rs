@@ -31,6 +31,10 @@ pub struct TbzWriter<W: Write> {
     inner: W,
     block_count: u32,
     signing_key: SigningKey,
+    /// The archive this writer is producing. `None` keeps the legacy unbound shape, so existing
+    /// callers are not silently changed -- an old archive stays readable and stays honestly
+    /// UNBOUND rather than being retro-labelled as belonging somewhere.
+    archive_id: Option<String>,
 }
 
 impl<W: Write> TbzWriter<W> {
@@ -39,6 +43,21 @@ impl<W: Write> TbzWriter<W> {
             inner,
             block_count: 0,
             signing_key,
+            archive_id: None,
+        }
+    }
+
+    /// Produce an ARCHIVE-BOUND archive: every block signs over this id and its own index.
+    ///
+    /// Pass the same id into the manifest, or the two commitments name different archives and the
+    /// reader will refuse -- which is the correct outcome and a confusing way to find out, so
+    /// `Manifest::sign_producer` should be given the same value.
+    pub fn bound_to(inner: W, signing_key: SigningKey, archive_id: &str) -> Self {
+        Self {
+            inner,
+            block_count: 0,
+            signing_key,
+            archive_id: Some(archive_id.to_string()),
         }
     }
 
@@ -59,13 +78,16 @@ impl<W: Write> TbzWriter<W> {
             vec![],
         );
 
-        let header = BlockHeader::new(
+        let mut header = BlockHeader::new(
             0,
             BlockType::Manifest,
             0, // Manifest is always JIS level 0
             manifest_json.len() as u64,
             compressed.len() as u64,
         );
+        if let Some(id) = &self.archive_id {
+            header = header.in_archive(id);
+        }
 
         self.write_block_raw(&header, &envelope, &compressed)?;
         self.block_count += 1;
@@ -82,13 +104,16 @@ impl<W: Write> TbzWriter<W> {
         let compressed = zstd::encode_all(data, 3)
             .map_err(|e| StreamError::Io(e))?;
 
-        let header = BlockHeader::new(
+        let mut header = BlockHeader::new(
             self.block_count,
             BlockType::Data,
             jis_level,
             data.len() as u64,
             compressed.len() as u64,
         );
+        if let Some(id) = &self.archive_id {
+            header = header.in_archive(id);
+        }
 
         self.write_block_raw(&header, envelope, &compressed)?;
         self.block_count += 1;
@@ -108,10 +133,20 @@ impl<W: Write> TbzWriter<W> {
             .map_err(|e| StreamError::Serialization(e.to_string()))?;
 
         // Build signing payload: header + envelope + compressed data
-        let mut sign_data = Vec::new();
-        sign_data.extend_from_slice(&header_json);
-        sign_data.extend_from_slice(&envelope_json);
-        sign_data.extend_from_slice(compressed_payload);
+        // ARCHIVE-BOUND WHEN WE HAVE AN ID, legacy shape when we do not. Two targets, never both:
+        // a block that verified under either would bind nothing, because an attacker would simply
+        // present the one that suits them.
+        let sign_data = match &self.archive_id {
+            Some(id) => crate::manifest::block_signing_target(
+                id, header.block_index, &header_json, &envelope_json, compressed_payload),
+            None => {
+                let mut d = Vec::new();
+                d.extend_from_slice(&header_json);
+                d.extend_from_slice(&envelope_json);
+                d.extend_from_slice(compressed_payload);
+                d
+            }
+        };
         let sig = signature::sign(&sign_data, &self.signing_key);
 
         // Write magic

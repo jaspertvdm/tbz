@@ -31,6 +31,24 @@ use tibet_zip_core::manifest::{Manifest, PRODUCER_DOMAIN};
 
 /// A fixed 32-byte seed. Deterministic ON PURPOSE: a fixture generated from a random key pins
 /// nothing, because it can never be reproduced by anyone else.
+/// THE ACTUAL PINNED VALUE, and the reason it exists.
+///
+/// The first version of this file was called "the commitment bytes are pinned" and pinned no bytes:
+/// it asserted PROPERTIES (compact separators, sorted keys, integer epoch) and wrote the fixture out
+/// fresh on every run. So when `archive_id` was later added to the commitment, the bytes changed,
+/// the root changed, and the test stayed green. A snapshot that rewrites itself is not a pin, and a
+/// test named for pinning that does not pin is the exact shape this repo keeps finding elsewhere:
+/// a name claiming more than the mechanism delivers.
+///
+/// This constant is the pin. Changing the commitment now REQUIRES changing this line, which makes
+/// the change deliberate and reviewable instead of silent. If a change is intended, update it and
+/// say so in the commit -- that edit is the record that someone meant it.
+const PINNED_ARCHIVE_ROOT: &str =
+    "sha256:7128f3fd21f336bac06eeafe062298e16f369a95aa3b655bc5bade9097e352f8";
+
+const PINNED_COMMITMENT_PREFIX: &str =
+    "{\"archive_id\":null,\"block_count\":1,\"format_version\":1,\"identity_epoch\":4,";
+
 const SEED: [u8; 32] = [
     0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
     0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
@@ -72,6 +90,20 @@ fn the_commitment_bytes_are_pinned() {
         "producer_sig": m.producer_sig,
     });
     let _ = std::fs::write(&out, serde_json::to_vec_pretty(&fixture).unwrap());
+
+    // ── THE PIN ITSELF, before any property check ──────────────────────────────────────────
+    assert_eq!(
+        m.archive_root(), PINNED_ARCHIVE_ROOT,
+        "THE COMMITMENT CHANGED.\n\nIf that was deliberate, update PINNED_ARCHIVE_ROOT and say so \
+         in the commit -- that edit is what makes the change reviewable. If it was not deliberate, \
+         something altered what this archive commits to without anyone deciding, and every existing \
+         archive_root in the wild just stopped matching a fresh computation."
+    );
+    assert!(
+        text.starts_with(PINNED_COMMITMENT_PREFIX),
+        "the commitment's leading bytes moved:\n  got  {}\n  want {}",
+        &text[..text.len().min(PINNED_COMMITMENT_PREFIX.len())], PINNED_COMMITMENT_PREFIX
+    );
 
     // ── the properties a second implementation must match, asserted rather than described ──
 

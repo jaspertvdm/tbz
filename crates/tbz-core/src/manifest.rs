@@ -39,6 +39,12 @@ pub struct Manifest {
     // The shape is taken from tibet-drop rather than invented: manifest-first identity binding,
     // signed over a canonical serialisation, with block commitments underneath. tibet-drop proves
     // the shape; this crate proves the carrier crypto; canonical TBZ converges them.
+    /// Writer-chosen precommitment naming THIS archive. Random, chosen BEFORE the first block, and
+    /// committed to by both the producer root and every block signature — which is the whole point:
+    /// an archive_id that merely sits alongside the bytes is a label again, and moves the problem
+    /// one layer rather than solving it. `None` on a legacy archive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archive_id: Option<String>,
     /// The producer's `.aint` identity. `None` on a legacy archive — absent, not broken.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub producer_identity: Option<String>,
@@ -107,6 +113,7 @@ impl Manifest {
             total_uncompressed_size: 0,
             max_nesting_depth: 0,
             capabilities: Vec::new(),
+            archive_id: None,
             producer_identity: None,
             producer_key_id: None,
             identity_epoch: None,
@@ -166,6 +173,43 @@ impl Default for Manifest {
 /// only meaningful together with a statement of what it was a signature OVER.
 pub const PRODUCER_DOMAIN: &str = "tbz-producer-archive:v1:";
 
+/// Domain for the archive precommitment itself.
+pub const TBZ_ARCHIVE_DOMAIN: &str = "tbz-archive-id:v1:";
+
+/// Domain for a block's binding to the archive it belongs to. Separate from PRODUCER_DOMAIN because
+/// they answer different questions -- who made this, versus which archive this block is part of --
+/// and one signature must never be readable as the other.
+pub const TBZ_BLOCK_DOMAIN: &str = "tbz-block-in-archive:v1:";
+
+/// Mint a fresh archive precommitment. 32 random bytes, hex.
+///
+/// CHOSEN BEFORE THE FIRST BLOCK, which is what preserves streaming: block N can be written and
+/// signed without knowing block N+1. The alternative -- signing blocks over the archive root --
+/// would force the writer to buffer the whole archive, and that price lands hardest on exactly the
+/// large chunked archives this format was extended to carry.
+pub fn mint_archive_id() -> String {
+    use rand::RngCore;
+    let mut b = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut b);
+    b.iter().map(|x| format!("{:02x}", x)).collect()
+}
+
+/// What a block signs to prove it belongs HERE and nowhere else.
+///
+/// `block_index` is inside it too: without that, blocks could still be swapped WITHIN one archive,
+/// which is the same confusion at a smaller radius.
+pub fn block_signing_target(archive_id: &str, block_index: u32, header_raw: &[u8],
+                            envelope_raw: &[u8], payload: &[u8]) -> Vec<u8> {
+    let mut t = Vec::new();
+    t.extend_from_slice(TBZ_BLOCK_DOMAIN.as_bytes());
+    t.extend_from_slice(archive_id.as_bytes());
+    t.extend_from_slice(&block_index.to_be_bytes());
+    t.extend_from_slice(header_raw);
+    t.extend_from_slice(envelope_raw);
+    t.extend_from_slice(payload);
+    t
+}
+
 /// What went wrong when a producer binding did not hold.
 ///
 /// Distinct variants on purpose. `Unsigned` and `Invalid` stop a consumer the same way and are
@@ -206,6 +250,7 @@ impl Manifest {
     pub fn producer_commitment(&self) -> Vec<u8> {
         use std::collections::BTreeMap;
         let mut m: BTreeMap<&str, serde_json::Value> = BTreeMap::new();
+        m.insert("archive_id", serde_json::json!(self.archive_id));
         m.insert("format_version", serde_json::json!(self.tbz_version));
         m.insert("producer_identity", serde_json::json!(self.producer_identity));
         m.insert("producer_key_id", serde_json::json!(self.producer_key_id));

@@ -53,13 +53,16 @@ use tibet_zip_core::stream::{TbzReader, TbzWriter};
 
 /// Two archives from ONE key. The shared key is the whole point: if the key were different, any
 /// verifier would already refuse, and the test would pass while proving nothing.
-fn archive_with(payload: &[u8], identity: &str, sk: &ed25519_dalek::SigningKey) -> Vec<Block> {
+fn archive_with(payload: &[u8], identity: &str, sk: &ed25519_dalek::SigningKey)
+    -> (Vec<Block>, String) {
+    let archive_id = tibet_zip_core::manifest::mint_archive_id();
     let mut buf = Vec::new();
     {
         let mut manifest = Manifest::new();
         manifest.set_signing_key(&sk.verifying_key());
+        manifest.archive_id = Some(archive_id.clone());
         manifest.sign_producer(identity, "key-7f3a", 4, sk);
-        let mut writer = TbzWriter::new(&mut buf, sk.clone());
+        let mut writer = TbzWriter::bound_to(&mut buf, sk.clone(), &archive_id);
         writer.write_manifest(&manifest).unwrap();
         let envelope = TibetEnvelope::new(
             signature::sha256_hash(payload),
@@ -71,32 +74,34 @@ fn archive_with(payload: &[u8], identity: &str, sk: &ed25519_dalek::SigningKey) 
         );
         writer.write_data_block(payload, 0, &envelope).unwrap();
     }
-    TbzReader::new(buf.as_slice()).read_all_blocks().unwrap()
+    (TbzReader::new(buf.as_slice()).read_all_blocks().unwrap(), archive_id)
 }
 
 #[test]
-#[ignore = "RED BY DESIGN: block commitments do not yet derive from the archive root (see module docs)"]
 fn a_block_from_one_archive_must_not_verify_under_another() {
     let sk = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
     let vk = sk.verifying_key();
 
-    let archive_a = archive_with(b"contents of archive A", "alice.aint", &sk);
-    let archive_b = archive_with(b"contents of archive B", "alice.aint", &sk);
+    let (archive_a, id_a) = archive_with(b"contents of archive A", "alice.aint", &sk);
+    let (archive_b, id_b) = archive_with(b"contents of archive B", "alice.aint", &sk);
+    assert_ne!(id_a, id_b, "two archives minted the same id — the precommitment is not unique");
 
     // POSITIVE CONTROL FIRST. Each block must verify in its own archive, or the refusal below could
     // just be a verifier that refuses everything.
-    assert!(archive_a[1].verify_signature(&vk).is_ok(), "block A did not verify in archive A");
-    assert!(archive_b[1].verify_signature(&vk).is_ok(), "block B did not verify in archive B");
+    assert!(archive_a[1].verify_signature_in_archive(&vk, &id_a).is_ok(),
+            "block A did not verify in archive A");
+    assert!(archive_b[1].verify_signature_in_archive(&vk, &id_b).is_ok(),
+            "block B did not verify in archive B");
 
     // THE TRANSPLANT. Archive A's data block, lifted whole, presented as archive B's. Nothing about
     // the block is altered — that is what makes this different from tampering: the bytes are
     // genuine, they are simply somewhere they were never authorised to be.
     let transplanted = archive_a[1].clone();
 
-    // Today this passes, because sign_data = header_raw || envelope_raw || payload carries nothing
-    // that names the archive it belongs to.
+    // Presented under archive B's id -- the only thing that changed.
+    let verdict = transplanted.verify_signature_in_archive(&vk, &id_b);
     assert!(
-        transplanted.verify_signature(&vk).is_err(),
+        verdict.is_err(),
         "a block from archive A verified while presented as part of archive B.\n\
          \n\
          The signature is genuine and the block is unaltered -- so this is not tampering, it is a \
@@ -107,6 +112,48 @@ fn a_block_from_one_archive_must_not_verify_under_another() {
          root (or from an unforgeable archive id), a sealed state's SBOM can be swapped for another \
          validly signed one and every check still passes."
     );
+
+    // AND FOR THE RIGHT REASON, which is the clause that gives the refusal meaning.
+    // ArchiveBindingInvalid says: these bytes are GENUINE and were never authorised here.
+    // SignatureInvalid would say: these bytes were altered. Different findings, different repairs,
+    // and collapsing them would lose exactly what this vector exists to show.
+    assert!(
+        matches!(verdict, Err(tibet_zip_core::block::BlockError::ArchiveBindingInvalid)),
+        "refused, but as {verdict:?} rather than ArchiveBindingInvalid. WRONG ARCHIVE CONTEXT is \
+         not the same finding as tampering, and a reader that cannot tell them apart cannot tell a \
+         relocated block from a corrupted one."
+    );
+}
+
+/// A legacy (unbound) archive stays readable and stays honestly UNBOUND.
+///
+/// The migration case, and the one that would be easiest to get wrong by being helpful: an old
+/// archive must not be retro-labelled as belonging somewhere. Its blocks verify as bytes-unaltered
+/// and prove nothing about which archive they came from — which is true, and is what `verify_signature`
+/// has always meant.
+#[test]
+fn legacy_blocks_stay_unbound_rather_than_becoming_wrong() {
+    let sk = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+    let vk = sk.verifying_key();
+
+    let mut buf = Vec::new();
+    {
+        let mut m = Manifest::new();
+        m.set_signing_key(&vk);
+        let mut w = TbzWriter::new(&mut buf, sk.clone());   // no archive_id: legacy shape
+        w.write_manifest(&m).unwrap();
+        let env = TibetEnvelope::new(signature::sha256_hash(b"legacy"), "data",
+                                     "application/octet-stream", "legacy", "old archive",
+                                     vec!["block:0".to_string()]);
+        w.write_data_block(b"legacy", 0, &env).unwrap();
+    }
+    let blocks = TbzReader::new(buf.as_slice()).read_all_blocks().unwrap();
+
+    assert!(blocks[1].verify_signature(&vk).is_ok(),
+            "a legacy block stopped verifying under the legacy check — migration broke reading");
+    assert!(matches!(blocks[1].verify_signature_in_archive(&vk, "any-archive"),
+                     Err(tibet_zip_core::block::BlockError::ArchiveBindingInvalid)),
+            "a legacy block claimed membership of an archive it never named");
 }
 
 /// The manifests genuinely differ, so the transplant above is a real relocation rather than two
