@@ -61,6 +61,21 @@ const REQUIRED_IN_COMMITMENT: &[&str] = &["producer_identity", "producer_key_id"
 
 const PAYLOAD: &[u8] = b"an archive that should name its maker";
 
+/// Build an archive WITH a producer binding, and hand back its manifest.
+///
+/// The manifest is where an archive declares what it IS -- block 0, always JIS level 0. So it is
+/// also where it declares WHO MADE IT. Data blocks binding to that root is the manifest/block
+/// transplant axis and has its own vector; see the module note.
+fn bound_manifest() -> (Manifest, tibet_zip_core::VerifyingKey) {
+    let (signing_key, _) = signature::generate_keypair();
+    let verifying_key = signing_key.verifying_key();
+
+    let mut manifest = Manifest::new();
+    manifest.set_signing_key(&verifying_key);
+    manifest.sign_producer("alice.aint", "key-7f3a", 4, &signing_key);
+    (manifest, verifying_key)
+}
+
 /// Everything the current block signature actually covers: header || envelope || payload.
 fn signed_commitment() -> Vec<u8> {
     let (signing_key, _) = signature::generate_keypair();
@@ -103,9 +118,9 @@ fn signed_commitment() -> Vec<u8> {
 // list -- without claiming the crate is defective. Remove both ignores when the binding lands; that
 // removal is the commit that earns the green.
 #[test]
-#[ignore = "RED BY DESIGN: producer identity is not yet in the signed commitment (see module docs)"]
 fn a_signed_commitment_carries_the_producer_identity() {
-    let commitment = String::from_utf8_lossy(&signed_commitment()).to_lowercase();
+    let (manifest, _) = bound_manifest();
+    let commitment = String::from_utf8_lossy(&manifest.producer_commitment()).to_lowercase();
 
     let missing: Vec<&str> = REQUIRED_IN_COMMITMENT
         .iter()
@@ -133,34 +148,92 @@ fn a_signed_commitment_carries_the_producer_identity() {
 
 /// B — FLIPPING ONE FIELD MUST BREAK VERIFICATION.
 ///
-/// Gated on A rather than asserted on its own. Until the field exists, "flip producer_identity and
-/// watch verify fail" would fail at FIELD NOT FOUND — a refusal for the wrong reason, which this
-/// stack has now been bitten by often enough to guard against by construction.
+/// The vector Jasper asked for: change ONLY the producer identity and require that the artefact
+/// stops verifying. A different identity must yield a different ARTEFACT, not a different label.
 #[test]
-#[ignore = "GATED ON TEST A: cannot flip a field that does not exist yet"]
 fn b_flipping_the_producer_identity_breaks_verification() {
-    let commitment = String::from_utf8_lossy(&signed_commitment()).to_lowercase();
-    let bound = REQUIRED_IN_COMMITMENT.iter().all(|f| commitment.contains(f));
+    // 1. POSITIVE CONTROL. Without this, every refusal below could be a verifier that refuses
+    //    everything -- which would pass this test while proving nothing.
+    let (manifest, _) = bound_manifest();
+    assert_eq!(
+        manifest.verify_producer(),
+        Ok(()),
+        "an untouched producer binding did not verify; nothing below means anything"
+    );
+    let root_before = manifest.archive_root();
 
-    if !bound {
-        // Not a silent skip. A skipped vector reads as a passing one at a glance, and that is the
-        // failure mode this whole file exists to avoid.
-        panic!(
-            "GATED ON TEST A. The producer identity is not yet inside the signed commitment, so \
-             flipping it could only fail at 'field not found' -- never at 'signature refused'. \
-             Measuring that would be measuring the absence of a field and calling it security.\n\
-             \n\
-             When A goes green, replace this body with the real mutation:\n\
-               1. build a valid archive and confirm it verifies       (positive control)\n\
-               2. change ONLY producer_identity in the canonical root\n\
-               3. require verification to fail\n\
-               4. require the failure to NAME the identity binding, not a parse error\n\
-             \n\
-             And retire producer_identity_is_not_yet_bound in cve_2026_0866.rs at the same moment: \
-             that test asserts the absence this one asserts the presence of, and leaving both would \
-             leave the suite contradicting itself."
-        );
+    // 2. CHANGE ONLY THE IDENTITY. One field, nothing else -- not the key, not the epoch, not a
+    //    block. If the artefact is identity-bound this alone must be enough.
+    let mut tampered = manifest.clone();
+    tampered.producer_identity = Some("mallory.aint".to_string());
+
+    assert_ne!(
+        tampered.archive_root(), root_before,
+        "the archive root did not move when the producer identity changed. Then identity is still \
+         METADATA beside the bytes rather than part of them, and the whole binding is cosmetic."
+    );
+
+    // 3. AND VERIFICATION MUST REFUSE IT.
+    let verdict = tampered.verify_producer();
+    assert!(
+        verdict.is_err(),
+        "a swapped producer identity still verified -- the archive does not bind its maker"
+    );
+
+    // 4. FOR THE RIGHT REASON. Unsigned and Incomplete are also Err, and both would mean the
+    //    refusal came from a missing field rather than from a signature that no longer holds. That
+    //    distinction is the whole clause: known bad must fail at the consumer for the RIGHT reason.
+    assert_eq!(
+        verdict, Err(tibet_zip_core::manifest::ProducerError::Invalid),
+        "refused, but not as Invalid ({verdict:?}) -- a refusal for another reason proves the \
+         field-checker works and says nothing about the binding"
+    );
+}
+
+/// The epoch is bound too — otherwise an identity-bound archive replays across a reseed.
+///
+/// Codex named this as the axis BEYOND identity: binding who is necessary and not sufficient, since
+/// a consumer must also know whether the key was current at the claimed causal point. Full
+/// key-currentness (current/reseeded/revoked/unknown) is a consumer-side question and still open;
+/// this only proves the epoch cannot be edited after the fact.
+#[test]
+fn the_identity_epoch_is_inside_the_commitment_too() {
+    let (manifest, _) = bound_manifest();
+    let mut rolled = manifest.clone();
+    rolled.identity_epoch = Some(manifest.identity_epoch.unwrap() + 1);
+
+    assert_ne!(rolled.archive_root(), manifest.archive_root(),
+               "the epoch is not part of the commitment — an archive could be re-dated silently");
+    assert_eq!(rolled.verify_producer(),
+               Err(tibet_zip_core::manifest::ProducerError::Invalid));
+}
+
+/// An archive with NO binding is unsigned, not invalid — and the difference is a different repair.
+#[test]
+fn a_legacy_archive_reads_unsigned_rather_than_broken() {
+    let (signing_key, _) = signature::generate_keypair();
+    let mut manifest = Manifest::new();
+    manifest.set_signing_key(&signing_key.verifying_key());
+
+    assert_eq!(
+        manifest.verify_producer(),
+        Err(tibet_zip_core::manifest::ProducerError::Unsigned),
+        "a legacy archive must read as UNSIGNED. Collapsing that into `invalid` is how 'no proof' \
+         starts reading like 'failed proof', and the two are repaired completely differently."
+    );
+}
+
+/// A binding that is declared and incomplete is neither of the above, and says which field is gone.
+#[test]
+fn a_half_declared_binding_names_what_is_missing() {
+    let (mut manifest, _) = bound_manifest();
+    manifest.producer_key_id = None;
+
+    match manifest.verify_producer() {
+        Err(tibet_zip_core::manifest::ProducerError::Incomplete(missing)) => {
+            assert!(missing.contains(&"producer_key_id"), "missing list did not name the field: {missing:?}");
+        }
+        other => panic!("a half-declared binding read as {other:?} — a named binding without its \
+                         fields is a label, and the reader must say WHICH field is absent"),
     }
-
-    unreachable!("A is green — implement the real mutation here (see the panic text above)");
 }

@@ -175,28 +175,32 @@ fn the_manifest_block_is_covered_too() {
     );
 }
 
-/// WHAT THIS VECTOR DOES NOT PROVE, stated so nobody reads it as more than it is.
+/// WHAT THIS VECTOR DOES NOT PROVE — and the name of this test changed once it stopped being true.
 ///
-/// It proves the header is bound to the data. It says nothing about WHO produced the archive:
-/// `sign_data = header_raw ‖ envelope_raw ‖ payload` carries no producer identity, no key id and no
-/// identity epoch. Swap the identity claimed in the manifest and you get a byte-identical artefact
-/// with a different name on it. That is a different attack and it needs its own vector.
+/// It proves the header is bound to the data. As of the producer binding (see
+/// producer_identity_binding.rs) the MANIFEST now names and signs its maker — but BLOCK
+/// commitments still do not derive from that root. `sign_data = header_raw || envelope_raw ||
+/// payload` carries no producer identity, so a block signed by the same key could be transplanted
+/// into another valid manifest unless a reader proves the block list and root composition.
+///
+/// That is Codex's manifest/block transplant axis, and this test is now its precursor: it measures
+/// the gap that vector will close. Renamed rather than deleted, because it was never wrong — only
+/// its name stopped describing what it measures.
 #[test]
-fn producer_identity_is_not_yet_bound() {
+fn block_commitments_do_not_yet_derive_from_the_archive_root() {
     let (blocks, vk) = built_archive();
 
-    // header + envelope + payload is the whole commitment; nothing here names a producer.
     let mut commitment = Vec::new();
     commitment.extend_from_slice(&blocks[1].header_raw);
     commitment.extend_from_slice(&blocks[1].envelope_raw);
     commitment.extend_from_slice(&blocks[1].payload);
 
     let signed_over = String::from_utf8_lossy(&commitment).to_lowercase();
-    for absent in ["producer_identity", "producer_key_id", "identity_epoch"] {
+    for absent in ["producer_identity", "archive_root"] {
         assert!(
             !signed_over.contains(absent),
-            "{absent} appears in the signed commitment — if that is now true, this test is the \
-             stale one and the identity-binding vector should replace it"
+            "{absent} now appears in the BLOCK commitment. If that is deliberate, this test is the \
+             stale one and the transplant vector should replace it."
         );
     }
 
