@@ -243,6 +243,15 @@ enum Commands {
         archive: String,
     },
 
+    /// Report the identity binding: who produced it, and whether its blocks belong to it
+    Binding {
+        /// Path to the TBZ archive
+        archive: String,
+        /// Emit machine-readable JSON for a consumer that decides admission
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Show manifest and block information
     #[command(alias = "i")]
     Inspect {
@@ -316,6 +325,7 @@ pub fn run() -> anyhow::Result<()> {
                 cmd_unpack_dispatch(&archive, &output, as_key.as_deref(), !no_preview, strict_type)
             }
             Commands::Verify { archive } => cmd_verify(&archive, mirror_url),
+            Commands::Binding { archive, json } => cmd_binding(&archive, json),
             Commands::Inspect { archive } => cmd_inspect(&archive),
             Commands::Init { platform, account, repo } => cmd_init(&platform, account, repo),
             Commands::Keygen { output } => cmd_keygen(&output),
@@ -581,6 +591,149 @@ fn cmd_pack(path: &str, output: &str, default_jis_level: u8, mirror_url: Option<
         }
     }
 
+    Ok(())
+}
+
+/// Report the identity binding — and DECIDE NOTHING.
+///
+/// The producer binding and the archive-id binding have existed in `tbz-core` since 1 September,
+/// with tests, and no invocable surface could reach them: `crates/tbz-cli/src/` contained zero
+/// references to `verify_producer` or `verify_signature_in_archive`. A guard nothing can call is
+/// the same defect as a guard that passes and refuses nothing.
+///
+/// THIS COMMAND REPORTS STATE, NEVER A VERDICT, and the split is deliberate. `tbz` answers *does
+/// this binding hold*. Whether the archive may therefore LAND here, now, is the consumer's
+/// question — `tza_admission` in ainternet-in-a-box owns it, because a crate that refuses on policy
+/// makes every consumer inherit someone else's judgement about what is acceptable.
+///
+/// So the vocabulary emitted here is not a new one. It is exactly the two axes that predicate
+/// already reads, so nothing has to translate and no third dialect appears:
+///
+///     producer_state   ok | unsigned | incomplete | invalid | no_verifying_key
+///     block_state      all_bound | unbound_legacy | wrong_archive | tampered | mixed
+fn cmd_binding(archive: &str, json: bool) -> anyhow::Result<()> {
+    match detect_format(archive)? {
+        ArchiveFormat::Unknown => anyhow::bail!("Not a TBZ archive: unrecognized format"),
+        ArchiveFormat::TibetZip => anyhow::bail!(
+            "This is a TIBET-ZIP (Desktop) archive. The producer/archive binding is a block-format \
+             property; there is nothing to report here rather than something that passed."
+        ),
+        ArchiveFormat::TbzBlock => {}
+    }
+
+    let file = fs::File::open(archive)?;
+    let mut reader = TbzReader::new(std::io::BufReader::new(file));
+
+    let mut manifest: Option<Manifest> = None;
+    let mut verifying_key: Option<tbz_core::VerifyingKey> = None;
+    // Per data block: did it DECLARE an archive id, and did it verify under this archive's?
+    let mut declared = 0usize;
+    let mut undeclared = 0usize;
+    let mut wrong = 0usize;
+    let mut tampered = 0usize;
+    let mut data_blocks = 0usize;
+
+    while let Some(block) = reader.read_block()? {
+        if block.header.block_type == BlockType::Manifest {
+            if let Ok(d) = block.decompress() {
+                if let Ok(m) = serde_json::from_slice::<Manifest>(&d) {
+                    verifying_key = m.get_verifying_key();
+                    manifest = Some(m);
+                }
+            }
+            continue;
+        }
+        data_blocks += 1;
+        let aid = manifest.as_ref().and_then(|m| m.archive_id.clone());
+        match (&block.header.archive_id, &aid) {
+            (None, _) => undeclared += 1,
+            (Some(b), Some(a)) if b != a => wrong += 1,
+            (Some(_), None) => wrong += 1,
+            (Some(_), Some(a)) => {
+                declared += 1;
+                if let Some(ref vk) = verifying_key {
+                    match block.verify_signature_in_archive(vk, a) {
+                        Ok(()) => {}
+                        Err(tbz_core::block::BlockError::ArchiveBindingInvalid) => {
+                            declared -= 1;
+                            wrong += 1;
+                        }
+                        Err(_) => {
+                            declared -= 1;
+                            tampered += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let producer_state = match manifest.as_ref().map(|m| m.verify_producer()) {
+        None => "no_verifying_key", // no manifest block at all: nothing declares anything
+        Some(Ok(())) => "ok",
+        Some(Err(tbz_core::manifest::ProducerError::Unsigned)) => "unsigned",
+        Some(Err(tbz_core::manifest::ProducerError::Incomplete(_))) => "incomplete",
+        Some(Err(tbz_core::manifest::ProducerError::Invalid)) => "invalid",
+        Some(Err(tbz_core::manifest::ProducerError::NoVerifyingKey)) => "no_verifying_key",
+    };
+
+    // ORDER MATTERS: a single tampered or misplaced block is the finding, and must not be averaged
+    // away by however many blocks around it are fine. `mixed` is deliberately not a middle grade —
+    // it means the unbound ones are precisely where something could have been added.
+    let block_state = if data_blocks == 0 {
+        "unbound_legacy"
+    } else if tampered > 0 {
+        "tampered"
+    } else if wrong > 0 {
+        "wrong_archive"
+    } else if declared > 0 && undeclared > 0 {
+        "mixed"
+    } else if declared == 0 {
+        "unbound_legacy"
+    } else {
+        "all_bound"
+    };
+
+    if json {
+        let out = serde_json::json!({
+            "kind": "org.ainternet.tbz.binding-report.v1",
+            "archive": archive,
+            "producer_state": producer_state,
+            "block_state": block_state,
+            "producer_identity": manifest.as_ref().and_then(|m| m.producer_identity.clone()),
+            "producer_key_id": manifest.as_ref().and_then(|m| m.producer_key_id.clone()),
+            "identity_epoch": manifest.as_ref().and_then(|m| m.identity_epoch),
+            "archive_id": manifest.as_ref().and_then(|m| m.archive_id.clone()),
+            "data_blocks": data_blocks,
+            "note": "State, not a verdict. Admission is the consumer's decision (tza_admission)."
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    println!("TBZ binding: {}\n", archive);
+    println!("  producer_state: {}", producer_state);
+    if let Some(ref m) = manifest {
+        if let Some(ref id) = m.producer_identity {
+            println!("    identity:     {}", id);
+        }
+        if let Some(ref k) = m.producer_key_id {
+            println!("    key id:       {}", k);
+        }
+        if let Some(e) = m.identity_epoch {
+            println!("    epoch:        {}", e);
+        }
+        match m.archive_id {
+            Some(ref a) => println!("    archive id:   {}", a),
+            None => println!("    archive id:   (none — legacy shape)"),
+        }
+    }
+    println!("  block_state:    {}  ({} data block(s))", block_state, data_blocks);
+    println!(
+        "\n  This is STATE, not a verdict. Whether it may land here, now, is decided by the\n  \
+         consumer — `box tza admission --producer {} --blocks {}`.",
+        producer_state, block_state
+    );
     Ok(())
 }
 
