@@ -1331,7 +1331,7 @@ dependencies = [
 
 [[package]]
 name = "tbz-cli"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "anyhow",
  "tibet-zip-cli",
@@ -1368,7 +1368,7 @@ dependencies = [
 
 [[package]]
 name = "tibet-zip-airlock"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "bytes",
  "libc",
@@ -1381,7 +1381,7 @@ dependencies = [
 
 [[package]]
 name = "tibet-zip-cli"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1404,7 +1404,7 @@ dependencies = [
 
 [[package]]
 name = "tibet-zip-core"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "aes-gcm",
  "byteorder",
@@ -1416,13 +1416,14 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror",
+ "x25519-dalek",
  "zeroize",
  "zstd",
 ]
 
 [[package]]
 name = "tibet-zip-jis"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "ed25519-dalek",
  "glob",
@@ -1435,7 +1436,7 @@ dependencies = [
 
 [[package]]
 name = "tibet-zip-mirror"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1842,6 +1843,18 @@ name = "writeable"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
+
+[[package]]
+name = "x25519-dalek"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7e468321c81fb07fa7f4c636c3972b9100f0346e5b6a9f2bd0603a52f7ed277"
+dependencies = [
+ "curve25519-dalek",
+ "rand_core",
+ "serde",
+ "zeroize",
+]
 
 [[package]]
 name = "xz2"
