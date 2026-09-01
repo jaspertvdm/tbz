@@ -1,0 +1,188 @@
+{
+ "tibet-core": [
+  "0.1.3",
+  "2026-05-31",
+  65,
+  "tibet-core"
+ ],
+ "tibet-airlock-kernel": [
+  "0.2.0",
+  "2026-05-29",
+  23,
+  "tibet-airlock-kernel"
+ ],
+ "tibet-trust-kernel": [
+  "1.0.0-alpha.5",
+  "2026-06-01",
+  284,
+  "tibet-trust-kernel"
+ ],
+ "tibet-airlock": [
+  "0.0.0",
+  "2026-04-11",
+  28,
+  "tibet-airlock"
+ ],
+ "tibet-zip-core": [
+  "2.3.0",
+  "2026-08-06",
+  930,
+  "tbz"
+ ],
+ "tibet-zip-mirror": [
+  "2.3.0",
+  "2026-08-06",
+  482,
+  "tbz"
+ ],
+ "tibet-zip-airlock": [
+  "2.3.0",
+  "2026-08-06",
+  469,
+  "tbz"
+ ],
+ "tibet-zip-jis": [
+  "2.3.0",
+  "2026-08-06",
+  476,
+  "tbz"
+ ],
+ "tibet-zip-cli": [
+  "2.3.0",
+  "2026-08-06",
+  291,
+  "tbz"
+ ],
+ "tibet-cortex-core": [
+  "0.3.0",
+  "2026-03-16",
+  376,
+  "tibet-cortex"
+ ],
+ "tibet-cortex-audit": [
+  "0.3.0",
+  "2026-03-16",
+  108,
+  "tibet-cortex"
+ ],
+ "tibet-oomllama": [
+  "0.1.0",
+  "2026-03-16",
+  32,
+  "oomllama"
+ ],
+ "tibet-dgx": [
+  "0.2.0",
+  "2026-04-18",
+  55,
+  "tibet-dgx"
+ ],
+ "tibet-cortex-airlock": [
+  "0.3.0",
+  "2026-03-16",
+  246,
+  "tibet-cortex"
+ ],
+ "tibet-cortex-jis": [
+  "0.3.0",
+  "2026-03-16",
+  174,
+  "tibet-cortex"
+ ],
+ "tibet-cortex-store": [
+  "0.3.0",
+  "2026-03-16",
+  104,
+  "tibet-cortex"
+ ],
+ "tibet-cortex-cli": [
+  "0.3.0",
+  "2026-03-16",
+  31,
+  "tibet-cortex"
+ ],
+ "jis-core": [
+  "0.4.0",
+  "2026-06-06",
+  120,
+  "jis-core"
+ ],
+ "tbz-cli": [
+  "2.3.0",
+  "2026-08-06",
+  227,
+  "tbz"
+ ],
+ "tbz-core": [
+  "2.3.0",
+  "2026-08-06",
+  316,
+  "tbz"
+ ],
+ "tbz-mirror": [
+  "2.3.0",
+  "2026-08-06",
+  256,
+  "tbz"
+ ],
+ "tbz-airlock": [
+  "2.3.0",
+  "2026-08-06",
+  250,
+  "tbz"
+ ],
+ "tbz-jis": [
+  "2.3.0",
+  "2026-08-06",
+  251,
+  "tbz"
+ ],
+ "tibet-iddrop": [
+  "0.3.1",
+  "2026-06-03",
+  41,
+  "tibet-iddrop"
+ ],
+ "cortex-core": [
+  "0.0.0",
+  "2026-03-14",
+  260,
+  "tibet-cortex"
+ ],
+ "cortex-audit": [
+  "0.0.0",
+  "2026-03-14",
+  87,
+  "tibet-cortex"
+ ],
+ "cortex-airlock": [
+  "0.0.0",
+  "2026-03-14",
+  173,
+  "tibet-cortex"
+ ],
+ "cortex-jis": [
+  "0.0.0",
+  "2026-03-14",
+  130,
+  "tibet-cortex"
+ ],
+ "cortex-store": [
+  "0.0.0",
+  "2026-03-14",
+  84,
+  "tibet-cortex"
+ ],
+ "cortex-cli": [
+  "0.0.0",
+  "2026-03-14",
+  36,
+  "tibet-cortex"
+ ],
+ "oomllama": [
+  "1.0.0-alpha.2",
+  "2026-04-19",
+  37,
+  "oomllama"
+ ]
+}
