@@ -211,6 +211,20 @@ enum Commands {
         /// Aliases: id / exec / doc / cmd / ack. Default: unspecified.
         #[arg(long = "type", value_name = "CLASS")]
         payload_type: Option<String>,
+        /// Bind this archive to a producer identity (an .aint). WITHOUT THIS THE ARCHIVE IS
+        /// UNBOUND, and unbound is a first-class state — storage, not a defect.
+        #[arg(long = "as", value_name = "AINT")]
+        producer: Option<String>,
+        /// Ed25519 signing key file (hex) backing --as. A future TPM2-backed signer replaces this
+        /// flag, not the binding: the identity source is meant to be swappable.
+        #[arg(long, value_name = "SIGN_KEY_PATH")]
+        key: Option<String>,
+        /// Key id recorded in the binding (default: short hash of the public key).
+        #[arg(long = "key-id", value_name = "ID")]
+        key_id: Option<String>,
+        /// Identity epoch — bumped when the identity is reseeded. Default 0.
+        #[arg(long, default_value = "0")]
+        epoch: u32,
     },
 
     /// Extract a TBZ archive via the TIBET Airlock
@@ -297,7 +311,8 @@ pub fn run() -> anyhow::Result<()> {
     // If a subcommand was given, use it directly
     if let Some(command) = cli.command {
         return match command {
-            Commands::Pack { path, output, jis_level, seal, to, from, payload_type } => {
+            Commands::Pack { path, output, jis_level, seal, to, from, payload_type,
+                             producer, key, key_id, epoch } => {
                 if seal {
                     let to_hex = to.ok_or_else(|| anyhow::anyhow!(
                         "--seal requires --to <pubkey-hex> (64 hex chars)"))?;
@@ -318,7 +333,23 @@ pub fn run() -> anyhow::Result<()> {
                     if payload_type.is_some() {
                         anyhow::bail!("--type only applies to sealed v2 archives (combine with --seal)");
                     }
-                    cmd_pack(&path, &output, jis_level, mirror_url)
+                    // --as and --key travel together. Refusing here rather than binding to an
+                    // ephemeral key is the point: a binding to a key nobody holds tomorrow names
+                    // an identity that cannot be checked, which is worse than declaring none.
+                    match (&producer, &key) {
+                        (Some(_), None) => anyhow::bail!(
+                            "--as <aint> needs --key <path> to sign with. The identity source is \
+                             meant to be swappable -- a TPM2-backed signer is the intended \
+                             alternative -- but there is no signer without one of them."
+                        ),
+                        (None, Some(_)) => anyhow::bail!(
+                            "--key without --as would sign with a persistent key and declare no \
+                             producer. Name the identity, or leave the archive unbound."
+                        ),
+                        _ => {}
+                    }
+                    cmd_pack(&path, &output, jis_level, mirror_url,
+                             producer.as_deref(), key.as_deref(), key_id.as_deref(), epoch)
                 }
             }
             Commands::Unpack { archive, output, as_key, no_preview, strict_type } => {
@@ -404,7 +435,7 @@ pub fn run() -> anyhow::Result<()> {
                 .unwrap_or_else(|| "output".to_string());
             let output = format!("{}.tza", dir_name);
             println!("Auto-detected: directory → pack to {}\n", output);
-            cmd_pack(&path, &output, 0, mirror_url)?;
+            cmd_pack(&path, &output, 0, mirror_url, None, None, None, 0)?;
             return Ok(());
         } else if p.is_file() {
             // Single file → pack
@@ -413,7 +444,7 @@ pub fn run() -> anyhow::Result<()> {
                 .unwrap_or_else(|| "output".to_string());
             let output = format!("{}.tza", file_name);
             println!("Auto-detected: file → pack to {}\n", output);
-            cmd_pack(&path, &output, 0, mirror_url)?;
+            cmd_pack(&path, &output, 0, mirror_url, None, None, None, 0)?;
             return Ok(());
         } else {
             anyhow::bail!("Path not found: {}", path);
@@ -426,7 +457,26 @@ pub fn run() -> anyhow::Result<()> {
 }
 
 /// Pack files into a TBZ archive
-fn cmd_pack(path: &str, output: &str, default_jis_level: u8, mirror_url: Option<&str>) -> anyhow::Result<()> {
+/// Pack a directory or file into a TBZ archive.
+///
+/// UNBOUND IS THE DEFAULT AND IT IS NOT A DEFECT. Jasper's framing, and it settles a question this
+/// code had been answering by accident: *"de handeling van verzenden is dat wat tekent."* A `.tza`
+/// is this system's data at rest as much as its data in transit, so most archives have no business
+/// naming a producer — they are storage. Binding is what SENDING adds.
+///
+/// That is why `pack` mints a throwaway keypair per archive: the signature proves the bytes did not
+/// change, and deliberately claims nothing about who made them. `tza_admission` already had the
+/// right word for the result — `carried`: storable, forwardable, not identity-bound. The vocabulary
+/// was correct before the reason was written down.
+///
+/// `--as <aint> --key <path>` is the opt-in that adds authorship: a persistent key instead of the
+/// throwaway, a declared producer, a minted `archive_id`, and every block bound to it so none can
+/// be transplanted into another archive. The key file is one identity SOURCE, not the definition of
+/// one — a TPM2-backed signer is the intended alternative, and the binding does not change shape
+/// when it arrives.
+fn cmd_pack(path: &str, output: &str, default_jis_level: u8, mirror_url: Option<&str>,
+            producer: Option<&str>, key_path: Option<&str>, key_id: Option<&str>,
+            epoch: u32) -> anyhow::Result<()> {
     let source = Path::new(path);
     if !source.exists() {
         anyhow::bail!("Source path does not exist: {}", path);
@@ -442,8 +492,22 @@ fn cmd_pack(path: &str, output: &str, default_jis_level: u8, mirror_url: Option<
         println!("  .jis.json found: {}", jis.repo_identifier());
     }
 
-    // Generate signing keypair for this archive
-    let (signing_key, verifying_key) = signature::generate_keypair();
+    // Signing key: a throwaway per archive UNLESS an identity was named. The throwaway proves the
+    // bytes are unaltered and says nothing about authorship, which is the honest default for
+    // storage. A named producer needs a key that outlives the archive, or the identity it declares
+    // could never be checked again.
+    let (signing_key, verifying_key) = match key_path {
+        None => signature::generate_keypair(),
+        Some(p) => {
+            let raw = fs::read_to_string(p)
+                .map_err(|e| anyhow::anyhow!("could not read signing key {}: {}", p, e))?;
+            let arr = hex_decode_32(raw.trim())
+                .map_err(|e| anyhow::anyhow!("signing key {}: {}", p, e))?;
+            let sk = tbz_core::SigningKey::from_bytes(&arr);
+            let vk = sk.verifying_key();
+            (sk, vk)
+        }
+    };
 
     // Chunk plan: a file larger than the airlock per-block cap is split into ordered chunks
     // (each below the cap) so every physical block still fits the airlock's bounded RAM. One flat
@@ -511,9 +575,32 @@ fn cmd_pack(path: &str, output: &str, default_jis_level: u8, mirror_url: Option<
     // Embed verifying key in manifest
     manifest.set_signing_key(&verifying_key);
 
+    // ── AUTHORSHIP, only if an identity was named ───────────────────────────────────────────────
+    // The archive_id is minted BEFORE anything is written and carried by both the manifest and
+    // every block header, so a block that is genuine and unaltered still refuses to verify inside
+    // a different archive. That is the transplant vector: same key is not the same archive.
+    let archive_id = match producer {
+        None => None,
+        Some(aint) => {
+            let id = tbz_core::manifest::mint_archive_id();
+            manifest.archive_id = Some(id.clone());
+            let kid = match key_id {
+                Some(k) => k.to_string(),
+                // Derived, not invented: the key identifies itself, and a caller who supplies
+                // nothing still gets something that points at the actual key.
+                None => format!("key-{}", &hex_encode(&verifying_key.to_bytes())[..8]),
+            };
+            manifest.sign_producer(aint, &kid, epoch as u64, &signing_key);
+            Some(id)
+        }
+    };
+
     // Write TBZ archive
     let out_file = fs::File::create(output)?;
-    let mut writer = TbzWriter::new(BufWriter::new(out_file), signing_key);
+    let mut writer = match archive_id {
+        Some(ref id) => TbzWriter::bound_to(BufWriter::new(out_file), signing_key, id),
+        None => TbzWriter::new(BufWriter::new(out_file), signing_key),
+    };
 
     // Block 0: manifest
     writer.write_manifest(&manifest)?;
@@ -565,6 +652,20 @@ fn cmd_pack(path: &str, output: &str, default_jis_level: u8, mirror_url: Option<
     println!("  Blocks: {}", total_blocks);
     println!("  Signing key (Ed25519 public): {}", vk_hex);
     println!("  Format: TBZ v{}", tbz_core::VERSION);
+    // Say which of the two this is, in both directions. An unbound archive that stays silent about
+    // being unbound is how "it has a signature" gets read as "we know who made it".
+    match (producer, &archive_id) {
+        (Some(aint), Some(id)) => {
+            println!("  Producer: {} (epoch {})", aint, epoch);
+            println!("  Archive id: {}", id);
+            println!("  BOUND — blocks belong to this archive and cannot be transplanted.");
+        }
+        _ => println!(
+            "  UNBOUND — the signature proves these bytes are unaltered and claims NOTHING about\n  \
+             who made them. Storable and forwardable; not identity-bound. Add --as <aint> --key\n  \
+             <path> when sending is what should sign."
+        ),
+    }
 
     // --- Transparency Mirror registration (best-effort) ---
     if let Some(url) = mirror_url {
